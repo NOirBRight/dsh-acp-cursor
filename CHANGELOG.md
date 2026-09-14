@@ -1,3 +1,7 @@
+## v0.1.17
+
+- `user/message` never reads `data.turn`. Plugin injects bind only via `source.kind === 'plugin'` and the open native turn.
+
 ## v0.1.16
 
 - Bind plugin context-injection `user/message` events (no `turn` field) to the open native turn so the mixed timeline still sits after AGENTS.md / skill-catalog. Keep a single `turn/start` start Match so history still loads.

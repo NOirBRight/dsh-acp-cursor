@@ -34,9 +34,12 @@ declare module '@deepseek-ai/dsh-client-ui-chat/client' {
 let openNativeTurn: number | undefined
 
 function turnOf(event: { readonly type: string; readonly data?: unknown }): number | undefined {
+  if (event.type === 'user/message') {
+    const kind = (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind
+    return kind === 'plugin' ? openNativeTurn : undefined
+  }
   const turn = (event.data as { turn?: unknown } | undefined)?.turn
   if (typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 1) return turn
-  if (event.type === 'user/message' && (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind === 'plugin') return openNativeTurn
   return undefined
 }
 

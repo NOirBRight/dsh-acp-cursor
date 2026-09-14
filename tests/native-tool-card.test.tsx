@@ -63,7 +63,8 @@ it('anchors the mixed timeline after plugin context injection', () => {
   const step = { type: 'step/start', seq: 2, time: 2, data: { turn: 1, step: 1 } }
   nativeTurnDefinition.start({} as never, { event: start } as never)
   expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { source: { kind: 'plugin' } } } as never)).toEqual({ id: '1', role: 'update' })
-  expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { source: { kind: 'user' } } } as never)).toBeNull()
+  expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { turn: 99, source: { kind: 'user' } } } as never)).toBeNull()
+  expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { turn: 99, source: { kind: 'plugin' } } } as never)).toEqual({ id: '1', role: 'update' })
   const node = nativeTurnDefinition.buildViewNode({
     key: 'k',
     id: '1',
