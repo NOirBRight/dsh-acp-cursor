@@ -1,3 +1,7 @@
+## v0.1.18
+
+Register catalogId/binding/unknown against providers-ui 0.2.9.
+
 ## v0.1.17
 
 - `user/message` never reads `data.turn`. Plugin injects bind only via `source.kind === 'plugin'` and the open native turn.
