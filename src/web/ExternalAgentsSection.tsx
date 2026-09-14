@@ -2,9 +2,10 @@
 import React, { useEffect, useRef, useState, type CSSProperties, type JSX, type ReactNode } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ModelCatalogEditor, ModelPickerDialog, applyCatalogPatch, type CatalogPatch, type ModelCatalogDraft, type ModelPickerSection } from 'dsh-llm-providers-ui/model-catalog'
-import { ProviderCardHeader, ProviderQuotaMeter, providerUiCss } from 'dsh-llm-providers-ui/provider-ui'
+import { ProviderCardHeader, ProviderQuotaMeter, providerUiCss, useProviderQuotaCache } from 'dsh-llm-providers-ui/provider-ui'
 import type { ProviderDetailCopy, ProviderDetailProps, ProviderItemSlotContext } from 'dsh-llm-providers-ui/provider-detail'
-import { dropPersistedUsageKeys, headerQuotaFromCache, peekCachedUsage, rememberHeadlineQuota } from 'dsh-llm-providers-ui/usage-readers'
+import { dropPersistedUsageKeys } from 'dsh-llm-providers-ui/usage-readers'
+import { headlineRemainingPercent } from './usage-reader.ts'
 import { decodeCatalogModels, type AcpCatalogModel, type AcpSettingsRow, type AcpSettingsSnapshot, type CursorAgentQuotaSnapshot } from '../client-contract.ts'
 import type { AcpSettingsKey } from './locales.ts'
 import { BrandMark } from './BrandMark.tsx'
@@ -590,7 +591,7 @@ export function CursorAgentCardBody({ t, row, snapshot, state, quota, quotaError
       {quotaError && <p role="status" style={muted}>{quotaError}{quota ? ' · ' + t('staleQuota') : ''}</p>}
       {!quota && !quotaError && <p style={muted}>{t('quotaUnavailable')}</p>}
       {quota?.groups.map((group, gi) => <div key={gi}><h3 data-cursor-agent-heading>{group.displayName ?? t('quota')}</h3><div data-cursor-agent-quota>{group.buckets.map((bucket, bi) => <div key={bucket.bucketId ?? bi}>
-        <ProviderQuotaMeter label={bucket.displayName ?? bucket.window ?? t('quota')} {...(bucket.disabled || bucket.remainingFraction === undefined ? {} : { remainingPercent: bucket.remainingFraction >= 1 ? 100 : Math.min(99, Math.round(bucket.remainingFraction * 100)) })} emptyLabel={bucket.disabled ? t('disabledBadge') : t('quotaUnavailable')} {...(bucket.resetTime ? { detail: t('resetsAt') + ' ' + new Date(bucket.resetTime).toLocaleString() } : {})} />
+        <ProviderQuotaMeter label={bucket.displayName ?? bucket.window ?? t('quota')} {...(bucket.disabled || bucket.remainingFraction === undefined ? {} : { remainingPercent: headlineRemainingPercent(bucket.remainingFraction) })} emptyLabel={bucket.disabled ? t('disabledBadge') : t('quotaUnavailable')} {...(bucket.resetTime ? { detail: t('resetsAt') + ' ' + new Date(bucket.resetTime).toLocaleString() } : {})} />
       </div>)}</div></div>)}
       {quota && <p style={muted}>{t('updatedAt')} {new Date(quota.observedAt).toLocaleString()}</p>}
     </section>}
@@ -678,10 +679,6 @@ export function ExternalAgentsSection({ t, load, save, run, quota: readQuota, ..
       if (next.status === 'ready') {
         setQuota(next); setQuotaError(undefined)
         const hit = next.groups.flatMap(group => group.buckets.map(bucket => ({ group: group.displayName, bucket }))).find(item => !item.bucket.disabled && item.bucket.remainingFraction !== undefined)
-        if (hit?.bucket.remainingFraction !== undefined) rememberHeadlineQuota('cursor-agent', 'Cursor', {
-          label: [hit.group, hit.bucket.window ?? hit.bucket.displayName].filter(Boolean).join(' · '),
-          remainingPercent: Math.round(hit.bucket.remainingFraction * 1000) / 10,
-        })
       }
       else { if (next.status !== 'error') clearQuota(); setQuotaError(next.message ?? t('quotaUnavailable')) }
     } catch (caught) {
@@ -750,8 +747,14 @@ export function ExternalAgentsSection({ t, load, save, run, quota: readQuota, ..
   const status = row === undefined ? t('loading') : !row.enabled ? t('disabledBadge') : state === 'missing' ? t('missingBadge') : state === 'error' ? t('errorBadge') : state === 'login' ? t('authBadge') : t('connected')
   const first = quota?.groups.flatMap(group => group.buckets.map(bucket => ({ group: group.displayName, bucket }))).find(item => !item.bucket.disabled && item.bucket.remainingFraction !== undefined)
   const resetDetail = first?.bucket.resetTime === undefined ? undefined : t('resetsAt') + ' ' + new Date(first.bucket.resetTime).toLocaleString()
-  const liveQuota = first === undefined ? undefined : { remainingPercent: first.bucket.remainingFraction! >= 1 ? 100 : Math.min(99, Math.round(first.bucket.remainingFraction! * 100)), label: [first.group, first.bucket.window ?? first.bucket.displayName].filter(Boolean).join(' · '), ...(quotaError === undefined ? (resetDetail === undefined ? {} : { detail: resetDetail }) : { detail: t('staleQuota') }) }
-  const headerQuota = snapshot !== undefined && !snapshot.rows[0]?.authenticated ? undefined : liveQuota ?? headerQuotaFromCache(peekCachedUsage('cursor-agent'))
+  const liveQuota = first === undefined ? null : { remainingPercent: headlineRemainingPercent(first.bucket.remainingFraction!), label: [first.group, first.bucket.window ?? first.bucket.displayName].filter(Boolean).join(' · '), ...(resetDetail === undefined ? {} : { detail: resetDetail }) }
+  const signedOut = snapshot !== undefined && snapshot.rows[0]?.authenticated !== true
+  const withheld = signedOut || quotaError !== undefined || (quota !== undefined && first === undefined)
+  const headerQuota = useProviderQuotaCache('cursor-agent', 'Cursor', liveQuota ?? null, {
+    answered: snapshot !== undefined,
+    signedOut,
+    withheld,
+  })
   // Migrated detail: the shared template owns the layout, so skip the legacy header toggle.
   if (slot.mode === 'detail' && row && snapshot) {
     return <>{error && <p role="alert" style={errorStyle}>{error}</p>}<CursorAgentCardBody t={t} row={row} snapshot={snapshot} state={state} {...(quota === undefined ? {} : { quota })} {...(quotaError === undefined ? {} : { quotaError })} quotaLoading={quotaLoading} working={working} polling={polling} saving={saving} dirty={dirty}

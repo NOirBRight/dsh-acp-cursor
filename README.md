@@ -8,11 +8,13 @@ This is **not** `dsh-llm-cursor` (unofficial chat route, provider `cursor`). Thi
 
 ## Install
 
-Requires `dsh-llm-providers-ui` 0.2.2 on the Host (shared ProviderDetail template). `dsh-acp-provider` is a profile dependency with no bundle of its own.
+Requires `dsh-llm-providers-ui` 0.2.8 on the Host (shared ProviderDetail template). `dsh-acp-provider` is a profile dependency with no bundle of its own.
+
+`catalogId` / `binding` and the unresolved `unknown` account state are attached at runtime. Published 0.2.8 types omit those fields; they only take effect on a newer Owner.
 
 ```sh
 dsh plugin --profile web add --force \
-  https://github.com/NOirBRight/dsh-llm-providers-ui/releases/download/v0.2.2/dsh-llm-providers-ui-0.2.2.tgz \
+  https://github.com/NOirBRight/dsh-llm-providers-ui/releases/download/v0.2.8/dsh-llm-providers-ui-0.2.8.tgz \
   https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.2/deepseek-ai-dsh-acp-provider-0.1.2.tgz \
   https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.17/deepseek-ai-dsh-acp-cursor-0.1.17.tgz
 ```

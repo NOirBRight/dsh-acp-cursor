@@ -17,5 +17,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
-  "exclude": ["src/web", "tests/web-registration.test.ts", "tests/cursor-agent-settings-card.test.ts", "tests/native-activity.test.ts", "tests/native-turn-container.test.ts", "tests/native-tree.test.ts", "tests/usage-reader.test.ts"]
+  "exclude": ["src/web", "tests/web-registration.test.ts", "tests/cursor-agent-settings-card.test.ts", "tests/native-activity.test.ts", "tests/native-turn-container.test.ts", "tests/native-tree.test.ts", "tests/usage-reader.test.ts", "tests/web-directory.test.ts"]
 }

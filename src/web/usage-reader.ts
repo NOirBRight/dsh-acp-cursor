@@ -2,6 +2,11 @@
 import type { ProviderUsageReader } from 'dsh-llm-providers-ui/usage-readers'
 import { ACP_SETTINGS_RPC_CHANNEL, QUOTA_ENDPOINT, decodeQuotaSnapshot } from '../client-contract.js'
 
+/** One-decimal remaining percent shared by the card header, body, and sidebar writer. */
+export function headlineRemainingPercent(fraction: number): number {
+  return Math.round(fraction * 1000) / 10
+}
+
 export function createCursorAgentUsageReader(): ProviderUsageReader {
   return { providerKey: 'cursor-agent', name: 'Cursor', async read(rpc, _refresh, signal) {
     const result = await rpc.call(ACP_SETTINGS_RPC_CHANNEL, QUOTA_ENDPOINT, {}, signal)
@@ -16,7 +21,7 @@ export function createCursorAgentUsageReader(): ProviderUsageReader {
       status: 'ready', fetchedAt: quota.observedAt,
       windows: quota.groups.flatMap((group, gi) => group.buckets.flatMap((bucket, bi) => {
         if (bucket.disabled || bucket.remainingFraction === undefined) return []
-        const remaining = Math.round(bucket.remainingFraction * 100)
+        const remaining = headlineRemainingPercent(bucket.remainingFraction)
         const label = bucket.displayName ?? bucket.window ?? group.displayName ?? 'Cursor'
         const resetsAt = bucket.resetTime === undefined ? undefined : resetsPrefix + new Date(bucket.resetTime).toLocaleString()
         return [{

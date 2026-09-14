@@ -36,7 +36,7 @@ export interface DshPluginConfig {
 export interface DshPluginContext extends ActivityBindingHostContext {
   on: ActivityBindingHostContext['on'] & ((event: 'session/disposed', listener: (session: { readonly id: string }) => void | Promise<void>) => () => void)
   effect(fn: () => unknown, name?: string): void
-  inject?(deps: string[], fn: (scope: { effect: (fn: () => unknown) => unknown; llm: { registerAdapter: (providers: string[], adapter: unknown) => AdapterRegistrationHandle }; connection: DshPluginContext['connection'] }) => void): void
+  inject?(deps: string[], fn: (scope: { effect: (fn: () => unknown) => unknown; llm: { registerAdapter: (providers: string[], adapter: unknown) => AdapterRegistrationHandle }; connection: DshPluginContext['connection']; modelSwitch?: { adapters: { register: (entry: { provider: string; role: 'agent' }) => () => void } } }) => void): void
   get?(name: string): unknown
   connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>): unknown } }
 }
@@ -143,6 +143,10 @@ function toProviderConfig(config: AcpCursorAgentSettingsConfig) {
 
 /** Mount the CursorAgent provider and the External Agents Settings RPC. */
 export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}): Promise<void> {
+  ctx.inject?.(['modelSwitch'], scope => {
+    const runtime = scope.modelSwitch
+    if (runtime !== undefined) scope.effect(() => runtime.adapters.register({ provider: 'cursor-agent', role: 'agent' }))
+  })
   const home = dshHome()
   const activity = new CursorAgentActivityStore(join(home, 'plugin-data', 'cursor-agent', 'history'))
   const { installActivityBindingGuard } = await import('./activity-binding.js')

@@ -25,7 +25,7 @@ describe('usage reader headline', () => {
     if (snapshot.status !== 'ready') return
     expect(snapshot.windows).toHaveLength(2)
     expect(snapshot.windows[1]?.remainingPercent).toBe(20)
-    expect(snapshot.windows[0]?.remainingPercent).toBe(56)
+    expect(snapshot.windows[0]?.remainingPercent).toBe(55.5)
     expect(snapshot.windows[0]?.id).not.toBe(snapshot.windows[1]?.id)
   })
 })
