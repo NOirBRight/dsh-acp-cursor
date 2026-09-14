@@ -62,7 +62,7 @@ it('anchors the mixed timeline after plugin context injection', () => {
   const start = { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } }
   const step = { type: 'step/start', seq: 2, time: 2, data: { turn: 1, step: 1 } }
   nativeTurnDefinition.start({} as never, { event: start } as never)
-  expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { turn: 1, source: { kind: 'plugin' } } } as never)).toEqual({ id: '1', role: 'update' })
+  expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { source: { kind: 'plugin' } } } as never)).toEqual({ id: '1', role: 'update' })
   expect(nativeTurnDefinition.match({ type: 'user/message', seq: 9, time: 9, data: { source: { kind: 'user' } } } as never)).toBeNull()
   const node = nativeTurnDefinition.buildViewNode({
     key: 'k',
@@ -72,7 +72,7 @@ it('anchors the mixed timeline after plugin context injection', () => {
     matches: [
       { event: start },
       { event: step },
-      { event: { type: 'user/message', seq: 9, data: { turn: 1, source: { kind: 'plugin' } } } },
+      { event: { type: 'user/message', seq: 9, data: { source: { kind: 'plugin' } } } },
     ],
   } as never)
   expect(node?.anchorSeq).toBeGreaterThan(9)

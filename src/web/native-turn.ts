@@ -30,12 +30,22 @@ declare module '@deepseek-ai/dsh-client-ui-chat/client' {
 }
 
 /** Folded row definition registered on the Chat conversation target. */
+/* Plugin user/message events have no turn field. Sequential assembler: one open turn at a time. */
+let openNativeTurn: number | undefined
+
+function turnOf(event: { readonly type: string; readonly data?: unknown }): number | undefined {
+  const turn = (event.data as { turn?: unknown } | undefined)?.turn
+  if (typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 1) return turn
+  if (event.type === 'user/message' && (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind === 'plugin') return openNativeTurn
+  return undefined
+}
+
 export const nativeTurnDefinition: ConversationNodeDefinition<CursorAgentNativeTurn> = {
   kind: 'cursor-agent-native',
   target: 'chat',
   match: event => {
-    const turn = (event.data as { turn?: unknown } | undefined)?.turn
-    if (typeof turn !== 'number' || !Number.isSafeInteger(turn) || turn < 1) return null
+    const turn = turnOf(event)
+    if (turn === undefined) return null
     const id = String(turn)
     if (event.type === 'turn/start') return { id, role: 'start' }
     if (event.type === 'turn/end'
@@ -51,11 +61,16 @@ export const nativeTurnDefinition: ConversationNodeDefinition<CursorAgentNativeT
   start: (context, match) => {
     if (match.event.type !== 'turn/start') throw new Error('CursorAgent native turn starts on turn/start')
     void context
-    return { turn: match.event.data.turn, startMs: match.event.time, endMs: null }
+    const turn = turnOf(match.event)
+    if (turn === undefined) throw new Error('CursorAgent native turn starts on turn/start')
+    openNativeTurn = turn
+    return { turn, startMs: match.event.time, endMs: null }
   },
-  update: (context, match) => match.event.type === 'turn/end'
-    ? { ...context.state, endMs: match.event.time }
-    : context.state,
+  update: (context, match) => {
+    if (match.event.type !== 'turn/end') return context.state
+    if (openNativeTurn === context.state.turn) openNativeTurn = undefined
+    return { ...context.state, endMs: match.event.time }
+  },
   publication: () => 'immediate',
   buildViewNode: (context): ChatConversationViewNode | null => {
     if (context.state === undefined) return null

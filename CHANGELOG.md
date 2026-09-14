@@ -1,3 +1,7 @@
+## v0.1.16
+
+- Bind plugin context-injection `user/message` events (no `turn` field) to the open native turn so the mixed timeline still sits after AGENTS.md / skill-catalog. Keep a single `turn/start` start Match so history still loads.
+
 ## v0.1.15
 
 - Start the native-turn Chat node on `turn/start` only. A later `step/start` in the same turn is an update, so the assembler no longer drops the whole transcript.
