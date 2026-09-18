@@ -76,6 +76,17 @@ export interface BridgeHost {
   loadSession?(sessionId: string): ExternalAgentSessionRef | undefined
   appendToolEvents?(sessionId: string | undefined, events: readonly CursorAgentToolEvent[]): void
   /**
+   * Write every coalesced activity record still buffered for this session.
+   * Called before the finish chunk so a settled turn never leaves its last
+   * text or tool state only in memory, and before the buffer is dropped.
+   * A throw fails the turn through the existing stream error path.
+   */
+  flushActivity?(sessionId: string): void
+  /** Flush every session's buffered activity; called before adapter teardown. */
+  flushActivityAll?(): void
+  /** Flush and drop one session's buffer; called after the native session is released. */
+  releaseActivity?(sessionId: string): void
+  /**
    * Resolve the authoritative sandbox policy for one stream call. The host reads
    * ctx.sandboxPolicy for the exact session; user and tool text never selects policy.
    * Absent or unresolvable policy fails closed to approval-required.
@@ -207,9 +218,14 @@ export function createCursorAgentLlmBridge(
     return work
   }
   return {
-    async reset() { listing = undefined; localModels = []; await runner.reset(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
-    async release(id) { await runner.release(sessionId(id)); emittedToolIds.delete(id); observedAgentTrajectories.delete(id) },
-    async dispose() { listing = undefined; localModels = []; await runner.dispose(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
+    async reset() { listing = undefined; localModels = []; hostAsk?.flushActivityAll?.(); await runner.reset(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
+    async release(id) {
+      await runner.release(sessionId(id))
+      hostAsk?.releaseActivity?.(id)
+      emittedToolIds.delete(id)
+      observedAgentTrajectories.delete(id)
+    },
+    async dispose() { listing = undefined; localModels = []; hostAsk?.flushActivityAll?.(); await runner.dispose(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
     providerInfo: provider => ({ id: provider, name: 'Cursor' }),
     // Native prompts can already have executed tools before a transport failure.
     providerRetryPolicy: () => ({ mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 }),
@@ -397,6 +413,11 @@ export function createCursorAgentLlmBridge(
           if (!state.textOpen) yield { type: 'block-start', index: 1, blockType: 'text' }
           yield { type: 'block-end', index: 1, block: { type: 'text', text: assembled } }
         }
+        // Buffered, coalesced activity must be durable before the turn result:
+        // the Core turn/end follows this chunk, so a later flush would fall
+        // outside the turn window and lose the last text or tool state.
+        // A throw here fails the turn through the existing stream path.
+        hostAsk?.flushActivity?.(options.sessionId)
         yield { type: 'finish', reason: finalStatus === 'cancelled'
           ? { kind: 'aborted', failure: { code: 'ABORTED', message: 'Native turn cancelled' } }
           : finalStatus === 'failed'
