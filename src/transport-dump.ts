@@ -1,37 +1,23 @@
-const maxLineLength = 4096
+import { redactCursorAgentText } from './auth.js'
+
 const dumpLine =
   /^Error: (?:RetriableError: (?!\[internal\] Failed to run step, exceeded max retries).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/
 const cursorServerCopy = 'Something went wrong communicating with the server. Please try again.'
 
-interface ReplyState {
-  disqualified: boolean
-  failure: string | undefined
-}
-
-function consumeLine(state: ReplyState, line: string) {
-  if (state.disqualified) return
-  const text = line.trimEnd()
-  if (dumpLine.test(text) || text === cursorServerCopy) {
-    state.failure = text
-  } else if (text.trim() !== '' && !(state.failure && /^\s+at\s/.test(text))) {
-    state.disqualified = true
-    state.failure = undefined
-  }
-}
-
 /** The dump line when assembled assistant text is only a Cursor ACP transport dump. */
 export function standaloneTransportDump(text: string): string | undefined {
-  const state: ReplyState = { disqualified: false, failure: undefined }
-  let line = ''
-  for (const [index, part] of text.split('\n').entries()) {
-    if (state.disqualified) return undefined
-    if (index > 0) {
-      consumeLine(state, line)
-      line = ''
-    }
-    if (line.length + part.length > maxLineLength) return undefined
-    line += part
+  let dump: string | undefined
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd()
+    if (dumpLine.test(line) || line === cursorServerCopy) dump = line
+    else if (line.trim() !== '' && !(dump && /^\s+at\s/.test(line))) return undefined
   }
-  consumeLine(state, line)
-  return state.failure
+  return dump
+}
+
+/** True when a native turn already failed as a transport dump (error is the redacted dump line). */
+export function dumpFailedNativeTurn(result: { status: string, text: string, error?: string }): boolean {
+  if (result.status !== 'failed' || result.error === undefined) return false
+  const dump = standaloneTransportDump(result.text)
+  return dump !== undefined && result.error === redactCursorAgentText(dump)
 }

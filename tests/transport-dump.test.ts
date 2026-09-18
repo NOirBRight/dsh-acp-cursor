@@ -105,6 +105,9 @@ it('keeps structured ACP errors and stopReason error/refusal as ordinary failed 
   expect(structured.error).toBe('structured boom')
   expect((await runDump([CANCEL], { stopReason: 'error' })).error).toBe('error')
   expect((await runDump([CANCEL], { stopReason: 'refusal' })).error).toBe('refusal')
+  const dumpShaped = await runDump([CANCEL], { stopReason: 'end_turn', error: CANCEL })
+  expect(dumpShaped.status).toBe('failed')
+  expect(dumpShaped.error).toBe('provider turn failed')
 })
 
 it('completes an ordinary answer', async () => {

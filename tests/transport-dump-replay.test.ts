@@ -104,4 +104,7 @@ it('does not replay a cancelled turn, a healthy answer, or a non-dump failure', 
   const structured = await streamDump([{ result: { status: 'failed', text: CANCEL, error: 'structured boom' } }])
   expect(structured.prompts).toEqual(['Ship the fix.'])
   expect(structured.finish?.reason.kind).toBe('error')
+  const dumpShaped = await streamDump([{ result: { status: 'failed', text: CANCEL, error: 'provider turn failed' } }])
+  expect(dumpShaped.prompts).toEqual(['Ship the fix.'])
+  expect(dumpShaped.finish?.reason.kind).toBe('error')
 })

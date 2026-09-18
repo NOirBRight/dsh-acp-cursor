@@ -49,7 +49,7 @@ function toResolvedModel(provider: string, requested: string, found: CursorCatal
   }
 }
 import { isRecord } from './decode.js'
-import { standaloneTransportDump } from './transport-dump.js'
+import { dumpFailedNativeTurn } from './transport-dump.js'
 import { CURSOR_AGENT_USER_QUESTION_ANSWER, CURSOR_AGENT_OBSERVED, CURSOR_AGENT_TEXT, CURSOR_AGENT_PARENT_TRAJECTORY, toDurableAgentEvents, toDurableToolEvents, type CursorAgentToolEvent, type CursorAgentOwnedEvent } from './tool-events.js'
 
 const APPROVE_LABEL = 'Approve'
@@ -368,7 +368,7 @@ export function createCursorAgentLlmBridge(
         let finalError = result.error
         let assembled = state.text.length > 0 ? state.text : result.text
         // Replay the original prompt once when the native turn already failed as a transport dump.
-        if (result.status === 'failed' && !signal.aborted && standaloneTransportDump(result.error ?? '') !== undefined) {
+        if (!signal.aborted && dumpFailedNativeTurn(result)) {
           const replay = run(prompt)
           state = yield* drain(replay, { thought: '', text: '', thoughtOpen: false, textOpen: false })
           const next = await replay
