@@ -206,19 +206,6 @@ export interface ActivityRpc {
   }>
 }
 
-/** Read one session history over RPC and fold it into rows.
- * Throws fail-closed on transport failure or corrupt history; aborts
- * propagate so the caller can drop stale generations.
- * @param rpc - Logical-channel RPC face.
- * @param sessionId - DSH session scoping the sidecar read.
- * @param signal - Caller cancellation for a superseded session or unmount.
- * @returns Folded tools, observations, and text for this session only.
- */
-export async function loadActivityHistory(rpc: ActivityRpc, sessionId: string, signal?: AbortSignal): Promise<NativeHistorySnapshot> {
-  const records = await loadActivityRecords(rpc, sessionId, signal)
-  return snapshotOf(applyActivityRecords(createNativeActivityFoldState(), records))
-}
-
 /** Read the full validated history; the bootstrap and resynchronization read. */
 async function loadActivityRecords(rpc: ActivityRpc, sessionId: string, signal?: AbortSignal, metrics?: NativeActivityMetrics): Promise<readonly CursorAgentActivityRecord[]> {
   if (metrics !== undefined) metrics.fullReadCalls += 1
