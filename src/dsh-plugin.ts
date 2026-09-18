@@ -284,6 +284,29 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
           const projections = ctx.get?.('sessionProjections') as { stateOf(session: unknown, key: 'plan'): { active: boolean } | undefined } | undefined
           return agent !== undefined && projections?.stateOf(agent.session, 'plan')?.active === true
         },
+        setPlanMode: (sessionId, active) => {
+          const agent = agentFor(ctx, sessionId)
+          const planMode = ctx.get?.('planMode') as { set?(agent: unknown, active: boolean): unknown } | undefined
+          if (agent !== undefined) planMode?.set?.(agent, active)
+        },
+        resolveSelectedModel: sessionId => {
+          const agent = agentFor(ctx, sessionId) as {
+            session?: unknown
+            options?: { provider?: string; model?: string; reasoningEffort?: string }
+          } | undefined
+          if (agent === undefined) return undefined
+          const projections = ctx.get?.('sessionProjections') as {
+            stateOf(session: unknown, key: 'modelSelection'): {
+              pending?: { provider?: string; model?: string; reasoningEffort?: string } | null
+              next?: { provider?: string; model?: string; reasoningEffort?: string } | null
+            } | undefined
+          } | undefined
+          const state = agent.session === undefined ? undefined : projections?.stateOf(agent.session, 'modelSelection')
+          const selected = state?.pending ?? state?.next ?? (agent.options?.model === undefined ? undefined : agent.options)
+          if (selected?.model === undefined || selected.model === '') return undefined
+          if (selected.provider !== undefined && selected.provider !== 'cursor-agent') throw new Error('Cursor model is not enabled: ' + selected.model)
+          return { model: selected.model, ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
+        },
         resolvePolicy: sessionId => resolveSandboxPolicy(ctx, sessionId),
         requestApproval: input => requestNativeApproval(ctx, input),
       })

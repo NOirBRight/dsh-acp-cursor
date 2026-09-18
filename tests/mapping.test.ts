@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { mapPermissionMode, validateCursorAgentIdentity } from '../src/mapping.js'
+import { cursorNativeModeOf, mapPermissionMode, validateCursorAgentIdentity } from '../src/mapping.js'
 
 describe('cursor ACP mapping', () => {
   it('maps DSH permission modes onto Cursor session mode agent', () => {
     expect(mapPermissionMode('approval-required')).toBe('agent')
     expect(mapPermissionMode('auto-accept-edits')).toBe('agent')
     expect(mapPermissionMode('full-access')).toBe('agent')
+  })
+
+  it('keeps an explicit Cursor plan mode instead of collapsing it to agent', () => {
+    expect(mapPermissionMode('approval-required', 'plan')).toBe('plan')
+    expect(mapPermissionMode('approval-required', 'ask')).toBe('ask')
+    expect(cursorNativeModeOf({ permissionMode: 'approval-required', nativeMode: 'plan' })).toBe('plan')
+    expect(cursorNativeModeOf({ permissionMode: 'approval-required', nativeMode: 'ask' })).toBe('ask')
+    expect(cursorNativeModeOf({ permissionMode: 'full-access' })).toBe('agent')
   })
 
   it('accepts cursor-like initialize identities', () => {

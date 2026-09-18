@@ -18,13 +18,23 @@ import {
   type CursorAgentNativeMode,
 } from './types.js'
 
+function isCursorNativeMode(value: unknown): value is CursorAgentNativeMode {
+  return value === 'plan' || value === 'ask' || value === 'agent'
+}
+
 /** Map the public permission policy to CursorAgent's native value. */
-export function mapPermissionMode(mode: ExternalAgentPermissionMode): CursorAgentNativeMode {
+export function mapPermissionMode(mode: ExternalAgentPermissionMode, native?: CursorAgentNativeMode): CursorAgentNativeMode {
+  if (isCursorNativeMode(native)) return native
   switch (mode) {
     case 'approval-required': return 'agent'
     case 'auto-accept-edits': return 'agent'
     case 'full-access': return 'agent'
   }
+}
+
+/** Read an optional native mode override carried on an open or native turn. */
+export function cursorNativeModeOf(turn: { readonly permissionMode: ExternalAgentPermissionMode; readonly nativeMode?: unknown }): CursorAgentNativeMode {
+  return mapPermissionMode(turn.permissionMode, isCursorNativeMode(turn.nativeMode) ? turn.nativeMode : undefined)
 }
 
 /** Return the modes advertised by this provider. */
