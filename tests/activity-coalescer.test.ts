@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ACTIVITY_COALESCE_WINDOW_MS,
+  ACTIVITY_MAX_PENDING_BYTES,
   ACTIVITY_MAX_PENDING_RECORDS,
   ACTIVITY_MAX_TEXT_CHARS,
   ACTIVITY_TOOL_SKIP_FLUSH,
   CursorAgentActivityCoalescer,
   type ActivityCoalescerSink,
 } from '../src/activity-coalescer.js'
+import { CursorAgentActivityMetrics } from '../src/activity-metrics.js'
 import type { CursorAgentActivityEvent } from '../src/activity-store.js'
-import { CURSOR_AGENT_SESSION_READY, CURSOR_AGENT_TEXT, CURSOR_AGENT_TOOL_START, CURSOR_AGENT_TOOL_UPDATE, foldCursorAgentToolEvent, type CursorAgentToolState } from '../src/tool-events.js'
+import { CURSOR_AGENT_MAX_TOOL_TEXT_CHARS, CURSOR_AGENT_SESSION_READY, CURSOR_AGENT_TEXT, CURSOR_AGENT_TOOL_START, CURSOR_AGENT_TOOL_UPDATE, foldCursorAgentToolEvent, type CursorAgentToolState } from '../src/tool-events.js'
 
 const SESSION = 'session-a'
 
@@ -218,10 +220,13 @@ describe('CursorAgent activity coalescer', () => {
     coalescer.append(SESSION, [text('lost')])
     expect(() => coalescer.flush(SESSION)).toThrow('disk full')
     fail = false
+    // Nothing is retried: the failed batch stays gone, and its error is owed to
+    // every later caller-owned operation even though the queue is now empty.
     expect(() => coalescer.append(SESSION, [ready()])).toThrow('disk full')
-    expect(() => coalescer.flush(SESSION)).not.toThrow()
-    coalescer.flush(SESSION)
+    expect(() => coalescer.flush(SESSION)).toThrow('disk full')
+    expect(() => coalescer.flushAll()).toThrow('disk full')
     expect(batches).toHaveLength(0)
+    expect(() => coalescer.release(SESSION)).toThrow('disk full')
     expect(coalescer.pendingCount(SESSION)).toBe(0)
   })
 
@@ -243,5 +248,193 @@ describe('CursorAgent activity coalescer', () => {
     coalescer.reset()
     expect(flat()).toHaveLength(2)
     expect(coalescer.pendingCount('session-b')).toBe(0)
+  })
+
+  it('writes a terminal tool state on arrival instead of waiting for the window', () => {
+    const { sink, batches, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    coalescer.append(SESSION, [toolUpdate('t1', 'running', 'out')])
+    // The running row is transient and stays buffered.
+    expect(batches).toHaveLength(0)
+    coalescer.append(SESSION, [toolUpdate('t1', 'completed', 'out')])
+    // No timer advance: completed is durable now, after the row it followed.
+    expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.status : '<other>')).toEqual(['running', 'completed'])
+    expect(batches.map(batch => batch.events.length)).toEqual([1, 1])
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+    vi.advanceTimersByTime(ACTIVITY_COALESCE_WINDOW_MS)
+    expect(batches).toHaveLength(2)
+  })
+
+  it('writes a failed tool state on arrival with nothing buffered', () => {
+    const { sink, batches, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    coalescer.append(SESSION, [toolUpdate('t2', 'failed')])
+    expect(batches).toHaveLength(1)
+    expect(flat()).toHaveLength(1)
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+  })
+
+  it('does not let buffered text or a merge delay a terminal tool state', () => {
+    const { sink, batches } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    coalescer.append(SESSION, [text('typing')])
+    coalescer.append(SESSION, [toolUpdate('t1', 'running', 'line 1')])
+    coalescer.append(SESSION, [toolUpdate('t1', 'failed', 'line 1')])
+    // The barrier wrote the text and the running row first, then the failure.
+    expect(batches.map(batch => batch.events.map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.status : event.type))).toEqual([
+      [CURSOR_AGENT_TEXT, 'running'],
+      ['failed'],
+    ])
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+  })
+
+  it('bounds one session buffer by serialized bytes and flushes instead of dropping', () => {
+    const { batches, flat, sink } = recorder()
+    const metrics = new CursorAgentActivityMetrics()
+    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const delta = 'x'.repeat(4096)
+    const arrivals = 128
+    for (let index = 0; index < arrivals; index++) {
+      coalescer.append(SESSION, [text(delta, 'text', 'trajectory-' + String(index))])
+      // The ceiling holds after every arrival, including the one that crossed it.
+      expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+      expect(coalescer.pendingCount(SESSION)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS)
+    }
+    expect(batches.length).toBeGreaterThan(0)
+    coalescer.flush(SESSION)
+    // Force-flushing is not dropping: every arrival is durable exactly once.
+    expect(flat()).toHaveLength(arrivals)
+    expect(flat().every(event => event.type === CURSOR_AGENT_TEXT && event.data.text === delta)).toBe(true)
+    expect(metrics.snapshot().pendingBytes).toBe(0)
+    expect(metrics.snapshot().pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+  })
+
+  it('never drops a record to fit the byte ceiling', () => {
+    const { flat, sink } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    // Control characters serialize to six bytes each, so the record and text
+    // ceilings cannot bound this alone; the byte ceiling must, and it may only
+    // flush around it.
+    const hostile = '\u0000'.repeat(ACTIVITY_MAX_TEXT_CHARS)
+    coalescer.append(SESSION, [text(hostile)])
+    expect(coalescer.pendingCount(SESSION)).toBe(1)
+    coalescer.flush(SESSION)
+    expect(flat()).toHaveLength(1)
+    expect(flat()[0]).toMatchObject({ type: CURSOR_AGENT_TEXT, data: { text: hostile } })
+  })
+
+  it('keeps the byte ceiling above the largest record the record limits allow', () => {
+    const bytes = (event: CursorAgentActivityEvent): number => Buffer.byteLength(JSON.stringify(event), 'utf8')
+    const hostile = (chars: number): string => '\u0000'.repeat(chars)
+    const worstText = text(hostile(ACTIVITY_MAX_TEXT_CHARS))
+    const worstTool: CursorAgentActivityEvent = {
+      type: CURSOR_AGENT_TOOL_UPDATE,
+      data: {
+        toolId: 't1',
+        name: hostile(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS),
+        status: 'running',
+        input: hostile(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS),
+        output: hostile(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS),
+        error: hostile(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS),
+      },
+    }
+    // Flushing can always restore the budget: no single record the per-record
+    // limits allow is larger than the ceiling it is charged against.
+    expect(bytes(worstText)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    expect(bytes(worstTool)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+  })
+
+  it('applies the byte ceiling per session', () => {
+    const { batches, sink } = recorder()
+    const metrics = new CursorAgentActivityMetrics()
+    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const filler = (session: string, index: number): CursorAgentActivityEvent => text('y'.repeat(4096), 'text', session + '-' + String(index))
+    const size = Buffer.byteLength(JSON.stringify(filler('a', 0)), 'utf8')
+    const perSession = Math.floor(ACTIVITY_MAX_PENDING_BYTES * 0.75 / size)
+    for (let index = 0; index < perSession; index++) coalescer.append('session-a', [filler('a', index)])
+    for (let index = 0; index < perSession; index++) coalescer.append('session-b', [filler('b', index)])
+    // Neither session crossed its own ceiling, so nothing was written although
+    // the two buffers together hold more bytes than one ceiling.
+    expect(batches).toHaveLength(0)
+    expect(coalescer.pendingCount('session-a')).toBe(perSession)
+    expect(coalescer.pendingCount('session-b')).toBe(perSession)
+    expect(metrics.snapshot().pendingBytes).toBeGreaterThan(ACTIVITY_MAX_PENDING_BYTES)
+  })
+
+  it('splits a merged tool row at the byte ceiling without changing the fold', () => {
+    const { flat, sink } = recorder()
+    const metrics = new CursorAgentActivityMetrics()
+    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const filler = (index: number): CursorAgentActivityEvent => text('y'.repeat(4000), 'text', 'trajectory-' + String(index))
+    const fillerBytes = Buffer.byteLength(JSON.stringify(filler(0)), 'utf8')
+    // Distinct trajectories never merge, so the count is exact and the buffer
+    // ends within one filler of the ceiling, leaving 16 KiB of headroom.
+    const fillers = Math.floor((ACTIVITY_MAX_PENDING_BYTES - 16 * 1024) / fillerBytes)
+    for (let index = 0; index < fillers; index++) {
+      coalescer.append(SESSION, [filler(index)])
+      expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    }
+    const first: CursorAgentActivityEvent = { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running', output: 'a' } }
+    // Cumulative output growth far larger than the remaining headroom: the row
+    // must be written out first and continued in its own record, never merged
+    // past the ceiling.
+    const grown = 'a' + '\u0000'.repeat(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS)
+    const second: CursorAgentActivityEvent = { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running', output: grown } }
+    coalescer.append(SESSION, [first])
+    coalescer.append(SESSION, [second])
+    expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    coalescer.flush(SESSION)
+
+    const updates = flat().filter(event => event.type === CURSOR_AGENT_TOOL_UPDATE)
+    expect(updates).toHaveLength(2)
+    expect(updates.at(-1)).toMatchObject({ data: { output: grown } })
+    // Splitting the merge is invisible to the fold, and no filler was lost.
+    const fold = (events: readonly CursorAgentActivityEvent[]): CursorAgentToolState | undefined => {
+      let state: CursorAgentToolState | undefined
+      for (const event of events) if (event.type === CURSOR_AGENT_TOOL_UPDATE) state = foldCursorAgentToolEvent(state, event)
+      return state
+    }
+    expect(fold(flat())).toEqual(fold([first, second]))
+    expect(flat().filter(event => event.type === CURSOR_AGENT_TEXT)).toHaveLength(fillers)
+  })
+
+  it('rethrows a deferred timer-flush failure even with an empty queue', () => {
+    const coalescer = new CursorAgentActivityCoalescer({ append: () => { throw new Error('write refused') } })
+    coalescer.append(SESSION, [text('buffered')])
+    vi.advanceTimersByTime(ACTIVITY_COALESCE_WINDOW_MS)
+    // The timer emptied the queue and swallowed its error; the next
+    // caller-owned operation must still report it.
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+    expect(() => coalescer.flush(SESSION)).toThrow('write refused')
+    expect(() => coalescer.flushAll()).toThrow('write refused')
+    expect(() => coalescer.reset()).toThrow('write refused')
+    // reset drops the buffer either way, so the failure is not carried on.
+    expect(() => coalescer.flush(SESSION)).not.toThrow()
+  })
+
+  it('surfaces a deferred timer-flush failure on release and still drops the buffer', () => {
+    const coalescer = new CursorAgentActivityCoalescer({ append: () => { throw new Error('write refused') } })
+    coalescer.append(SESSION, [text('buffered')])
+    vi.advanceTimersByTime(ACTIVITY_COALESCE_WINDOW_MS)
+    expect(() => coalescer.release(SESSION)).toThrow('write refused')
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+    expect(() => coalescer.release(SESSION)).not.toThrow()
+  })
+
+  it('flushes the healthy sessions before reporting a deferred failure', () => {
+    const { batches, sink } = recorder()
+    const failing: ActivityCoalescerSink = {
+      append: (sessionId, events) => {
+        if (sessionId === 'session-a') throw new Error('write refused')
+        sink.append(sessionId, events)
+      },
+    }
+    const coalescer = new CursorAgentActivityCoalescer(failing)
+    coalescer.append('session-a', [text('lost')])
+    vi.advanceTimersByTime(ACTIVITY_COALESCE_WINDOW_MS)
+    coalescer.append('session-b', [text('kept')])
+    expect(() => coalescer.flushAll()).toThrow('write refused')
+    // One session's deferred failure must not abandon another's records.
+    expect(batches.map(batch => batch.sessionId)).toEqual(['session-b'])
   })
 })

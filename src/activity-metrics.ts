@@ -35,6 +35,9 @@ export interface CursorAgentActivityMetricsSnapshot {
   /** Buffered records across all sessions right now. */
   readonly pendingRecords: number
   readonly pendingRecordsPeak: number
+  /** Buffered serialized bytes across all sessions right now. */
+  readonly pendingBytes: number
+  readonly pendingBytesPeak: number
 }
 
 const ZERO: CursorAgentActivityMetricsSnapshot = {
@@ -55,6 +58,8 @@ const ZERO: CursorAgentActivityMetricsSnapshot = {
   failedFlushes: 0,
   pendingRecords: 0,
   pendingRecordsPeak: 0,
+  pendingBytes: 0,
+  pendingBytesPeak: 0,
 }
 
 /** Monotonic milliseconds for one operation; the counters only ever store the difference. */
@@ -104,12 +109,15 @@ export class CursorAgentActivityMetrics {
     this.counts.failedFlushes += 1
   }
 
-  /** Set the buffered-record gauge and track its peak.
+  /** Set the buffered gauges and track their peaks.
    * @param records - Buffered records across all sessions.
+   * @param bytes - Buffered serialized bytes across all sessions.
    */
-  recordPending(records: number): void {
+  recordPending(records: number, bytes: number): void {
     this.counts.pendingRecords = records
     if (records > this.counts.pendingRecordsPeak) this.counts.pendingRecordsPeak = records
+    this.counts.pendingBytes = bytes
+    if (bytes > this.counts.pendingBytesPeak) this.counts.pendingBytesPeak = bytes
   }
 
   /** Record one bounded incremental page read.
