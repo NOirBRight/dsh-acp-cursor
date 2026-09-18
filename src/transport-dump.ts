@@ -1,7 +1,7 @@
 const maxLineLength = 4096
-const transportError =
-  /^Error: (?:RetriableError: (?!\[internal\]).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/
-const serverError = 'Something went wrong communicating with the server. Please try again.'
+const dumpLine =
+  /^Error: (?:RetriableError: (?!\[internal\] Failed to run step, exceeded max retries).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/
+const cursorServerCopy = 'Something went wrong communicating with the server. Please try again.'
 
 interface ReplyState {
   disqualified: boolean
@@ -11,7 +11,7 @@ interface ReplyState {
 function consumeLine(state: ReplyState, line: string) {
   if (state.disqualified) return
   const text = line.trimEnd()
-  if (transportError.test(text) || text === serverError) {
+  if (dumpLine.test(text) || text === cursorServerCopy) {
     state.failure = text
   } else if (text.trim() !== '' && !(state.failure && /^\s+at\s/.test(text))) {
     state.disqualified = true

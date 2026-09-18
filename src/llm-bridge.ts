@@ -367,10 +367,11 @@ export function createCursorAgentLlmBridge(
         let finalStatus = result.status
         let finalError = result.error
         let assembled = state.text.length > 0 ? state.text : result.text
-        if (result.status === 'failed' && !signal.aborted && standaloneTransportDump(result.text) !== undefined) {
-          const follow = run(prompt)
-          state = yield* drain(follow, { thought: '', text: '', thoughtOpen: false, textOpen: false })
-          const next = await follow
+        // Replay the original prompt once when the native turn already failed as a transport dump.
+        if (result.status === 'failed' && !signal.aborted && standaloneTransportDump(result.error ?? '') !== undefined) {
+          const replay = run(prompt)
+          state = yield* drain(replay, { thought: '', text: '', thoughtOpen: false, textOpen: false })
+          const next = await replay
           finalStatus = next.status
           finalError = next.error
           assembled = state.text.length > 0 ? state.text : next.text

@@ -95,9 +95,11 @@ export class CursorAgentSession implements ExternalAgentSession {
       if (protocolFailure !== undefined) throw protocolFailure
       await publishUsage(response, boundedHost)
       const stopReason = isRecord(response) ? response.stopReason : undefined
-      const dump = request.signal.aborted || stopReason === 'cancelled' ? undefined : standaloneTransportDump(text)
-      const failure = providerFailure ?? responseFailure(response) ?? dump
-      const status = request.signal.aborted || stopReason === 'cancelled' ? 'cancelled' : failure !== undefined || stopReason === 'refusal' || stopReason === 'error' ? 'failed' : 'completed'
+      const cancelled = request.signal.aborted || stopReason === 'cancelled'
+      const structured = providerFailure ?? responseFailure(response)
+      const dump = cancelled || structured !== undefined || stopReason === 'error' || stopReason === 'refusal' ? undefined : standaloneTransportDump(text)
+      const failure = structured ?? dump
+      const status = cancelled ? 'cancelled' : failure !== undefined || stopReason === 'refusal' || stopReason === 'error' ? 'failed' : 'completed'
       await boundedHost.publish({ type: 'turn-result', status, content: text })
       return { status, text, nativeSessionId: this.nativeSession, ...(this.ref.resumeCursor === undefined ? {} : { resumeCursor: this.ref.resumeCursor }), ...(status === 'failed' ? { error: redactCursorAgentText(failure ?? String(stopReason ?? 'provider turn failed')) } : {}) }
     } catch (error) {

@@ -87,11 +87,24 @@ it('fails a dump delivered in streamed chunks or with a stack', async () => {
 it('completes mixed prose, fenced dumps, and agent-loop exhaustion', async () => {
   expect((await runDump(['I inspected the files.\n' + CANCEL])).status).toBe('completed')
   expect((await runDump(['```text\n' + CANCEL + '\n```'])).status).toBe('completed')
+  expect((await runDump(['the error was "' + CANCEL + '"'])).status).toBe('completed')
   expect((await runDump([INTERNAL])).status).toBe('completed')
+})
+
+it('fails a RetriableError that is not the agent-loop exhaustion line', async () => {
+  expect((await runDump(['Error: RetriableError: [internal] boom'])).status).toBe('failed')
 })
 
 it('keeps a cancelled turn cancelled even when the text looks like a dump', async () => {
   expect((await runDump([CANCEL], { stopReason: 'cancelled' })).status).toBe('cancelled')
+})
+
+it('keeps structured ACP errors and stopReason error/refusal as ordinary failed native turns', async () => {
+  const structured = await runDump([CANCEL], { stopReason: 'end_turn', error: 'structured boom' })
+  expect(structured.status).toBe('failed')
+  expect(structured.error).toBe('structured boom')
+  expect((await runDump([CANCEL], { stopReason: 'error' })).error).toBe('error')
+  expect((await runDump([CANCEL], { stopReason: 'refusal' })).error).toBe('refusal')
 })
 
 it('completes an ordinary answer', async () => {
