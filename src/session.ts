@@ -22,6 +22,7 @@ import { createCursorAgentInteractionHandler } from './interaction.js'
 import { mapPermissionMode, normalizeCursorAgentSessionUpdate } from './mapping.js'
 import type { AcpConnection } from './protocol.js'
 import { selectCursorAcpModel } from './model-config.js'
+import { standaloneTransportDump } from './transport-dump.js'
 import { CURSOR_AGENT_PERMISSION_MODES, type CursorAgentClientFilesystem, type CursorAgentProviderConfig } from './types.js'
 
 /** One provider-native session with turn-scoped host callbacks. */
@@ -94,10 +95,13 @@ export class CursorAgentSession implements ExternalAgentSession {
       if (protocolFailure !== undefined) throw protocolFailure
       await publishUsage(response, boundedHost)
       const stopReason = isRecord(response) ? response.stopReason : undefined
-      const failure = providerFailure ?? responseFailure(response)
-      const status = request.signal.aborted || stopReason === 'cancelled' ? 'cancelled' : failure !== undefined || stopReason === 'refusal' || stopReason === 'error' ? 'failed' : 'completed'
+      const cancelled = request.signal.aborted || stopReason === 'cancelled'
+      const structured = providerFailure ?? responseFailure(response)
+      const dump = cancelled || structured !== undefined || stopReason === 'error' || stopReason === 'refusal' ? undefined : standaloneTransportDump(text)
+      const failure = structured ?? dump
+      const status = cancelled ? 'cancelled' : failure !== undefined || stopReason === 'refusal' || stopReason === 'error' ? 'failed' : 'completed'
       await boundedHost.publish({ type: 'turn-result', status, content: text })
-      return { status, text, nativeSessionId: this.nativeSession, ...(this.ref.resumeCursor === undefined ? {} : { resumeCursor: this.ref.resumeCursor }), ...(status === 'failed' ? { error: redactCursorAgentText(failure ?? String(stopReason ?? 'provider turn failed')) } : {}) }
+      return { status, text, nativeSessionId: this.nativeSession, ...(this.ref.resumeCursor === undefined ? {} : { resumeCursor: this.ref.resumeCursor }), ...(status === 'failed' ? { error: redactCursorAgentText(failedTurnError(failure, dump, text, stopReason)) } : {}) }
     } catch (error) {
       if (request.signal.aborted || isAbortError(error)) return { status: 'cancelled', text, nativeSessionId: this.nativeSession }
       return { status: 'failed', text, nativeSessionId: this.nativeSession, error: redactCursorAgentText(errorMessage(error)) }
@@ -140,6 +144,15 @@ async function promptBlocks(prompt: string, attachments: readonly ExternalAgentA
 }
 
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength }
+function failedTurnError(failure: string | undefined, dump: string | undefined, text: string, stopReason: unknown): string {
+  const message = failure ?? String(stopReason ?? 'provider turn failed')
+  if (dump !== undefined) return message
+  const leaked = standaloneTransportDump(text)
+  if (leaked !== undefined && redactCursorAgentText(message) === redactCursorAgentText(leaked)) {
+    return typeof stopReason === 'string' && stopReason !== 'end_turn' && stopReason !== 'cancelled' ? stopReason : 'provider turn failed'
+  }
+  return message
+}
 function responseFailure(response: unknown): string | undefined {
   if (!isRecord(response)) return undefined
   const nested = isRecord(response.error) ? stringValue(response.error.message) : undefined
