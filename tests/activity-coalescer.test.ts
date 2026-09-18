@@ -8,7 +8,7 @@ import {
   type ActivityCoalescerSink,
 } from '../src/activity-coalescer.js'
 import type { CursorAgentActivityEvent } from '../src/activity-store.js'
-import { CURSOR_AGENT_SESSION_READY, CURSOR_AGENT_TEXT, CURSOR_AGENT_TOOL_START, CURSOR_AGENT_TOOL_UPDATE } from '../src/tool-events.js'
+import { CURSOR_AGENT_SESSION_READY, CURSOR_AGENT_TEXT, CURSOR_AGENT_TOOL_START, CURSOR_AGENT_TOOL_UPDATE, foldCursorAgentToolEvent, type CursorAgentToolState } from '../src/tool-events.js'
 
 const SESSION = 'session-a'
 
@@ -166,6 +166,30 @@ describe('CursorAgent activity coalescer', () => {
     expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.output : '')).toEqual(['repaint'])
     coalescer.flush(SESSION)
     expect(coalescer.pendingCount(SESSION)).toBe(0)
+  })
+
+  it('folds a repeated repaint to the row the un-coalesced stream produced', () => {
+    const { sink, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    const events: CursorAgentActivityEvent[] = [
+      toolStart('t1'),
+      { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running', input: 'ls', location: { target: '/tmp', kind: 'file' } } },
+      { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running' } },
+      { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running' } },
+    ]
+    for (const event of events) coalescer.append(SESSION, [event])
+    coalescer.flush(SESSION)
+    const fold = (batch: readonly CursorAgentActivityEvent[]): CursorAgentToolState | undefined => {
+      let state: CursorAgentToolState | undefined
+      for (const event of batch) {
+        if (event.type === CURSOR_AGENT_TOOL_START || event.type === CURSOR_AGENT_TOOL_UPDATE) state = foldCursorAgentToolEvent(state, event)
+      }
+      return state
+    }
+    // A repaint that omits input and location must not erase them: the durable
+    // record folds to the same row as the stream it replaced.
+    expect(fold(flat())).toEqual(fold(events))
+    expect(fold(flat())?.location).toEqual({ target: '/tmp', kind: 'file' })
   })
 
   it('keeps per-tool updates separate and preserves terminal states', () => {

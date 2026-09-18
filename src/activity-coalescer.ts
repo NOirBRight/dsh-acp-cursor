@@ -136,6 +136,27 @@ function tailOutput(pending: ToolPending): string {
   return pending.data.output ?? ''
 }
 
+/**
+ * Whether an update repeats the pending row field for field, so folding it in
+ * leaves the folded row unchanged.
+ *
+ * Undefined matches only undefined: the fold keeps a prior value when an update
+ * omits a field, so absorbing an update that omits one would erase it from the
+ * durable row instead of preserving the state the stream folded to.
+ */
+function repeatsPendingRow(previous: CursorAgentToolUpdateData, next: CursorAgentToolUpdateData): boolean {
+  const equal = (left: unknown, right: unknown): boolean => left === undefined || right === undefined
+    ? left === right
+    : JSON.stringify(left) === JSON.stringify(right)
+  return next.status === previous.status
+    && equal(next.name, previous.name)
+    && equal(next.ownership, previous.ownership)
+    && equal(next.location, previous.location)
+    && equal(next.input, previous.input)
+    && equal(next.output, previous.output)
+    && equal(next.error, previous.error)
+}
+
 /** Materialize one pending record back into its durable event. */
 function toEvent(pending: Pending): CursorAgentActivityEvent {
   return pending.kind === 'tool'
@@ -298,13 +319,12 @@ export class CursorAgentActivityCoalescer {
       return false
     }
     if (pending !== undefined
-      && data.status === pending.data.status
       && (data.output ?? '').length <= pending.base
-      && (data.output ?? '').startsWith(tailOutput(pending))) {
-      // A redraw that does not grow the row: keep the newest value in the same
-      // record instead of writing one record per repaint. A real growth (a new
-      // value on top of the first one) still materializes a record of its own.
-      pending.data = data
+      && (data.output ?? '').startsWith(tailOutput(pending))
+      && repeatsPendingRow(pending.data, data)) {
+      // A repaint that repeats the row is not written again: the record stands as
+      // it is, so a field this update omits cannot be erased from the durable row.
+      // A redraw that changes the value or the row still materializes a record.
       pending.skipped += 1
       return pending.skipped >= ACTIVITY_TOOL_SKIP_FLUSH
     }
