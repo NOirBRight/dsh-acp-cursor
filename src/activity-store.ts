@@ -11,6 +11,7 @@ import {
   type CursorAgentFullAccessEvent,
 } from './activity-contract.js'
 import type { CursorAgentSessionReadyEvent, CursorAgentToolEvent } from './tool-events.js'
+import { CursorAgentActivityMetrics, nowMs } from './activity-metrics.js'
 
 export { ACTIVITY_SCHEMA_VERSION } from './activity-contract.js'
 export type { CursorAgentActivityHistory, CursorAgentActivityRecord } from './activity-contract.js'
@@ -22,9 +23,34 @@ export type CursorAgentActivityEvent = CursorAgentSessionReadyEvent | CursorAgen
 export class CursorAgentActivityStore extends ExternalAgentActivityStore<CursorAgentActivityEvent, CursorAgentActivityRecord> {
   /** Capture the history root; directories are created lazily on append.
    * @param rootDirectory - Explicit history root, e.g. home/plugin-data/cursor-agent/history.
+   * @param metrics - Optional value-free counters; omit to skip measurement entirely.
    */
-  constructor(rootDirectory: string) {
+  constructor(rootDirectory: string, private readonly metrics?: CursorAgentActivityMetrics) {
     super({ rootDirectory, schemaVersion: ACTIVITY_SCHEMA_VERSION, decodeRecord: decodeActivityRecord })
+  }
+
+  /** Append through the base store, counting the batch and its write latency.
+   * @param sessionId - DSH session owning the history.
+   * @param events - Durable typed events.
+   */
+  override append(sessionId: string, events: readonly CursorAgentActivityEvent[]): void {
+    const started = nowMs()
+    try {
+      super.append(sessionId, events)
+    } finally {
+      this.metrics?.recordAppend(events.length, nowMs() - started)
+    }
+  }
+
+  /** Read the full validating history, counting it as the one O(history) read.
+   * The first append for a session also lands here, which is exactly the
+   * one-time cursor initialization the counters should show.
+   * @param sessionId - Required session id.
+   * @returns The schema version plus validated records.
+   */
+  override read(sessionId: string): CursorAgentActivityHistory {
+    this.metrics?.recordFullRead()
+    return super.read(sessionId)
   }
 
   /** Read one bounded page strictly after an exclusive cursor, validating from that base sequence.
@@ -35,11 +61,17 @@ export class CursorAgentActivityStore extends ExternalAgentActivityStore<CursorA
    * @returns Ordered records, the cursor to pass next, and whether more remain.
    */
   readActivityPage(sessionId: string, afterSeq: number): CursorAgentActivityPage {
+    const started = nowMs()
     try {
       const page = this.readAfter(sessionId, afterSeq, ACTIVITY_PAGE_RECORD_LIMIT)
+      this.metrics?.recordPage(page.records.length, nowMs() - started)
       return { version: ACTIVITY_SCHEMA_VERSION, records: page.records, nextCursor: page.nextCursor, hasMore: page.hasMore }
     } catch (error) {
-      throw cursorAhead(error, afterSeq) ?? error
+      const stale = cursorAhead(error, afterSeq)
+      // A refused cursor is what makes a client resynchronize, so count it here
+      // rather than where the wire error code is minted.
+      if (stale !== undefined) this.metrics?.recordStaleCursor()
+      throw stale ?? error
     }
   }
 }
