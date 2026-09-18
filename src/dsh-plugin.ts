@@ -9,6 +9,7 @@ import { CursorAgentActivityStore, type CursorAgentActivityEvent } from './activ
 import type { AcpCursorAgentSettingsConfig, AcpSettingsRow, AcpSettingsSnapshot } from './client-contract.js'
 import { deriveCursorAgentHarnessPath, validateCursorAgentInstallation } from './installation.js'
 import { CursorAgentActivityCoalescer } from './activity-coalescer.js'
+import { CursorAgentActivityMetrics } from './activity-metrics.js'
 
 import { applyCatalogOverlay, pickerGroupsFromCursorCatalog } from './catalog.js'
 import { createCursorAgentLlmBridge } from './llm-bridge.js'
@@ -29,17 +30,19 @@ import { CURSOR_AGENT_SESSION_READY, type CursorAgentToolEvent } from './tool-ev
  * writers. `flush` is the turn-settlement and disposal seam; it throws the
  * original persistence error, which the bridge turns into a failed turn.
  * @param rootDirectory - Explicit history root.
- * @returns The store plus the coalescing append/flush/release seam.
+ * @returns The store plus the coalescing append/flush/release seam and its value-free counters.
  */
 export function createCursorAgentActivityWriter(rootDirectory: string): {
   readonly store: CursorAgentActivityStore
+  readonly metrics: CursorAgentActivityMetrics
   append(sessionId: string | undefined, events: readonly CursorAgentActivityEvent[]): void
   flush(sessionId: string): void
   flushAll(): void
   release(sessionId: string): void
   pendingCount(sessionId: string): number
 } {
-  const store = new CursorAgentActivityStore(rootDirectory)
+  const metrics = new CursorAgentActivityMetrics()
+  const store = new CursorAgentActivityStore(rootDirectory, metrics)
   const coalescer = new CursorAgentActivityCoalescer({
     append: (sessionId, events) => {
       try {
@@ -48,9 +51,10 @@ export function createCursorAgentActivityWriter(rootDirectory: string): {
         throw new Error('Unable to persist CursorAgent activity; native execution stopped.')
       }
     },
-  })
+  }, undefined, metrics)
   return {
     store,
+    metrics,
     append: (sessionId, events) => {
       if (sessionId === undefined) throw new Error('Native activity requires an explicit DSH session id')
       coalescer.append(sessionId, events)

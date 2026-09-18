@@ -18,6 +18,7 @@ import {
   type CursorAgentToolUpdateData,
 } from './tool-events.js'
 import type { CursorAgentActivityEvent } from './activity-store.js'
+import { CursorAgentActivityMetrics, nowMs } from './activity-metrics.js'
 
 /** Transient delivery window; a closed paragraph still flushes immediately. */
 export const ACTIVITY_COALESCE_WINDOW_MS = 400
@@ -172,14 +173,18 @@ function toEvent(pending: Pending): CursorAgentActivityEvent {
  */
 export class CursorAgentActivityCoalescer {
   private readonly sessions = new Map<string, SessionBuffer>()
+  /** Buffered records across all sessions, kept so the counters stay O(1) per append. */
+  private pendingTotal = 0
 
   /** Capture the durable sink and optional timer injection for tests.
    * @param sink - Durable writer; must throw (not reject) so failures reach the turn.
    * @param windowMs - Maximum time a transient record may stay buffered.
+   * @param metrics - Optional value-free counters; omit to skip measurement entirely.
    */
   constructor(
     private readonly sink: ActivityCoalescerSink,
     private readonly windowMs: number = ACTIVITY_COALESCE_WINDOW_MS,
+    private readonly metrics?: CursorAgentActivityMetrics,
   ) {}
 
   /**
@@ -223,13 +228,17 @@ export class CursorAgentActivityCoalescer {
     if (buffer === undefined || buffer.queue.length === 0) return
     const batch = buffer.queue
     buffer.queue = []
+    this.pendingDelta(-batch.length)
+    const started = nowMs()
     try {
       // Drop the timer first: a throwing sink must not leave a live timer that
       // re-enters the same failed batch.
       buffer.deferred = undefined
       this.clearTimer(buffer)
       this.sink.append(sessionId, batch.map(toEvent))
+      this.metrics?.recordFlush(batch.length, nowMs() - started)
     } catch (error) {
+      this.metrics?.recordFlushFailure()
       buffer.deferred = error instanceof Error ? error : new Error('CursorAgent activity flush failed')
       throw buffer.deferred
     }
@@ -271,6 +280,8 @@ export class CursorAgentActivityCoalescer {
     } finally {
       for (const buffer of this.sessions.values()) this.clearTimer(buffer)
       this.sessions.clear()
+      this.pendingTotal = 0
+      this.metrics?.recordPending(0)
     }
   }
 
@@ -283,6 +294,12 @@ export class CursorAgentActivityCoalescer {
     const buffer: SessionBuffer = { queue: [], timer: undefined, deferred: undefined }
     this.sessions.set(sessionId, buffer)
     return buffer
+  }
+
+  /** Move the buffered-record gauge and mirror it into the counters. */
+  private pendingDelta(records: number): void {
+    this.pendingTotal += records
+    this.metrics?.recordPending(this.pendingTotal)
   }
 
   /** Merge one delta into the pending tail.
@@ -298,9 +315,11 @@ export class CursorAgentActivityCoalescer {
     const pending = last?.kind === 'text' && last.key === key ? last : undefined
     if (pending !== undefined && pending.data.text.length + data.text.length <= ACTIVITY_MAX_TEXT_CHARS) {
       pending.data.text += data.text
+      this.metrics?.recordCoalesced(1)
       return atTextBoundary(pending.data.text)
     }
     buffer.queue.push({ kind: 'text', key, data: { ...data } })
+    this.pendingDelta(1)
     return atTextBoundary(data.text)
   }
 
@@ -316,6 +335,7 @@ export class CursorAgentActivityCoalescer {
     const pending = last?.kind === 'tool' && last.toolId === data.toolId ? last : undefined
     if (pending !== undefined && toolMergeable(pending, data)) {
       buffer.queue[buffer.queue.length - 1] = mergeToolUpdate(pending, data)
+      this.metrics?.recordCoalesced(1)
       return false
     }
     if (pending !== undefined
@@ -326,9 +346,11 @@ export class CursorAgentActivityCoalescer {
       // it is, so a field this update omits cannot be erased from the durable row.
       // A redraw that changes the value or the row still materializes a record.
       pending.skipped += 1
+      this.metrics?.recordCoalesced(1)
       return pending.skipped >= ACTIVITY_TOOL_SKIP_FLUSH
     }
     buffer.queue.push({ kind: 'tool', toolId: data.toolId, data: { ...data }, base: data.output?.length ?? 0, skipped: 0 })
+    this.pendingDelta(1)
     return false
   }
 
