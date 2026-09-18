@@ -4,7 +4,7 @@
  * id; id is the turn number, so a later step/start in the same turn must be an
  * update. Matching every step/start as start throws and drops the whole
  * transcript. Later step/chunk/message events stay updates so the mixed
- * timeline can still raise the anchor past context injection.
+ * timeline can still raise the anchor past every context injection.
  */
 import type {
   ConversationNodeContext,
@@ -30,13 +30,23 @@ declare module '@deepseek-ai/dsh-client-ui-chat/client' {
 }
 
 /** Folded row definition registered on the Chat conversation target. */
-/* Plugin user/message events have no turn field. Sequential assembler: one open turn at a time. */
+/* Injected user/message events have no turn field. Sequential assembler: one open turn at a time. */
 let openNativeTurn: number | undefined
+
+function sourceKindOf(event: { readonly data?: unknown }): unknown {
+  return (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind
+}
+
+/** Direct user/steering bubbles stay off this node. Every other source is a context injection. */
+function isInjectedContext(event: { readonly type: string; readonly data?: unknown }): boolean {
+  if (event.type !== 'user/message') return false
+  const kind = sourceKindOf(event)
+  return typeof kind === 'string' && kind !== 'user'
+}
 
 function turnOf(event: { readonly type: string; readonly data?: unknown }): number | undefined {
   if (event.type === 'user/message') {
-    const kind = (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind
-    return kind === 'plugin' ? openNativeTurn : undefined
+    return isInjectedContext(event) ? openNativeTurn : undefined
   }
   const turn = (event.data as { turn?: unknown } | undefined)?.turn
   if (typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 1) return turn
