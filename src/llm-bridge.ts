@@ -218,14 +218,38 @@ export function createCursorAgentLlmBridge(
     return work
   }
   return {
-    async reset() { listing = undefined; localModels = []; hostAsk?.flushActivityAll?.(); await runner.reset(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
+    // A failing flush must not skip the runner teardown: the caller's mount
+    // guard has to see a fully reset runner even when buffered activity could
+    // not be written, so the next mount cannot re-enter a half-reset adapter.
+    // The flush error still propagates once the runner is reset.
+    async reset() {
+      listing = undefined
+      localModels = []
+      try {
+        hostAsk?.flushActivityAll?.()
+      } finally {
+        await runner.reset()
+        emittedToolIds.clear()
+        observedAgentTrajectories.clear()
+      }
+    },
     async release(id) {
       await runner.release(sessionId(id))
       hostAsk?.releaseActivity?.(id)
       emittedToolIds.delete(id)
       observedAgentTrajectories.delete(id)
     },
-    async dispose() { listing = undefined; localModels = []; hostAsk?.flushActivityAll?.(); await runner.dispose(); emittedToolIds.clear(); observedAgentTrajectories.clear() },
+    async dispose() {
+      listing = undefined
+      localModels = []
+      try {
+        hostAsk?.flushActivityAll?.()
+      } finally {
+        await runner.dispose()
+        emittedToolIds.clear()
+        observedAgentTrajectories.clear()
+      }
+    },
     providerInfo: provider => ({ id: provider, name: 'Cursor' }),
     // Native prompts can already have executed tools before a transport failure.
     providerRetryPolicy: () => ({ mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 }),

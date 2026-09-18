@@ -7,6 +7,7 @@ import { ExternalAgentProviderRegistry, modelId, providerId, sessionId, toolId, 
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createCursorAgentActivityWriter } from '../src/dsh-plugin.js'
 import { createCursorAgentLlmBridge, type BridgeHost } from '../src/llm-bridge.js'
+import { ACTIVITY_COALESCE_WINDOW_MS } from '../src/activity-coalescer.js'
 import { decodeActivityRecord, type CursorAgentActivityRecord } from '../src/activity-contract.js'
 import type { CursorAgentActivityEvent } from '../src/activity-store.js'
 import { foldActivityRecords, foldAgentTextRecords } from '../src/web/native-activity.js'
@@ -70,8 +71,10 @@ function activityHost(writer: ActivityWriter): BridgeHost {
 /**
  * Drive the real bridge over a fake ACP provider. `steps` are published by the
  * fake native turn in order; `host` is the durable seam under test.
+ * `onNativeDispose` counts native session disposals, which is how the runner's
+ * reset/dispose becomes observable.
  */
-function harness(steps: readonly Step[], host: BridgeHost): Harness {
+function harness(steps: readonly Step[], host: BridgeHost, onNativeDispose?: () => void): Harness {
   const abort = new AbortController()
   const provider: ExternalAgentProvider = {
     info: { id: providerId('cursor-agent'), name: 'Cursor' },
@@ -79,7 +82,7 @@ function harness(steps: readonly Step[], host: BridgeHost): Harness {
     openSession: async (): Promise<ExternalAgentSession> => ({
       ref: { provider: providerId('cursor-agent'), session: sessionId(SESSION), nativeSession: sessionId('native-1') },
       supportedModes: [...VALID_MODES],
-      dispose: async () => undefined,
+      dispose: async () => { onNativeDispose?.() },
       runTurn: async (_request, turnHost) => {
         for (const step of steps) {
           if (!('publish' in step)) { await Promise.race([step.wait, aborted(abort.signal)]); continue }
@@ -128,11 +131,17 @@ function aborted(signal: AbortSignal): Promise<void> {
   })
 }
 
+/** Poll a predicate with a deadline, so a missing write fails an assertion instead of the test timeout. */
+async function waitFor(predicate: () => boolean, deadlineMs = 1000): Promise<void> {
+  const deadline = Date.now() + deadlineMs
+  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 1))
+}
+
 /** Map one durable event to the ACP publication that produces it. */
 function toWireEvent(event: CursorAgentActivityEvent): Parameters<Parameters<ExternalAgentSession['runTurn']>[1]['publish']>[0] {
   if (event.type === CURSOR_AGENT_TEXT) return event.data.kind === 'text' ? { type: 'assistant-delta', text: event.data.text } : { type: 'thought-delta', text: event.data.text }
   if (event.type === CURSOR_AGENT_TOOL_START) return { type: 'tool-activity', toolId: toolId(event.data.toolId), name: event.data.name, status: event.data.status }
-  if (event.type === CURSOR_AGENT_TOOL_UPDATE) return { type: 'tool-activity', toolId: toolId(event.data.toolId), name: 'Shell', status: event.data.status, ...(event.data.output === undefined ? {} : { output: event.data.output }) }
+  if (event.type === CURSOR_AGENT_TOOL_UPDATE) return { type: 'tool-activity', toolId: toolId(event.data.toolId), name: 'Shell', status: event.data.status, ...(event.data.output === undefined ? {} : { output: event.data.output }), ...(event.data.error === undefined ? {} : { error: event.data.error }) }
   throw new Error('unsupported test event')
 }
 
@@ -254,5 +263,73 @@ describe('CursorAgent activity coalescing through the bridge', () => {
     }
     const h = harness([delta('buffered then refused')], failing)
     await expect(h.drain()).rejects.toThrow('Unable to persist CursorAgent activity; native execution stopped.')
+  })
+
+  it('makes terminal tool states durable before the turn settles', async () => {
+    const root = tempRoot()
+    const writer = createCursorAgentActivityWriter(root)
+    const h = harness([
+      toolStart('t1'),
+      toolProgress('t1', 'done', 'completed'),
+      toolStart('t2'),
+      { publish: { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't2', status: 'failed', error: 'boom' } } },
+      { wait: new Promise<void>(() => undefined) },
+    ], activityHost(writer))
+    const pump = h.drain()
+    // No flush and no timer advance: the deadline is inside the 400 ms coalescing
+    // window, so a terminal state that merely waited for its window would not be
+    // durable yet.
+    const deadline = ACTIVITY_COALESCE_WINDOW_MS - 100
+    await waitFor(() => recordsOf(root).filter(record => record.type === CURSOR_AGENT_TOOL_UPDATE).length >= 2, deadline)
+    const updates = recordsOf(root).filter(record => record.type === CURSOR_AGENT_TOOL_UPDATE)
+    expect(updates.map(record => [record.data.toolId, record.data.status])).toEqual([['t1', 'completed'], ['t2', 'failed']])
+    expect(updates[1]?.data.error).toBe('boom')
+    // Each start row was written before the terminal state that followed it.
+    expect(recordsOf(root).map(record => record.type)).toEqual([
+      CURSOR_AGENT_SESSION_READY,
+      CURSOR_AGENT_TOOL_START,
+      CURSOR_AGENT_TOOL_UPDATE,
+      CURSOR_AGENT_TOOL_START,
+      CURSOR_AGENT_TOOL_UPDATE,
+    ])
+    h.abort()
+    const chunks = await pump
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
+    // Settlement neither duplicates nor reorders the already-durable states.
+    expect(recordsOf(root).filter(record => record.type === CURSOR_AGENT_TOOL_UPDATE)).toHaveLength(2)
+  })
+
+  it('runs the runner reset before rethrowing a flush failure', async () => {
+    const writer = createCursorAgentActivityWriter(tempRoot())
+    const host = activityHost(writer)
+    let flushFails = true
+    let nativeDisposals = 0
+    const h = harness([delta('settled')], {
+      ...host,
+      flushActivityAll: () => { if (flushFails) throw new Error('Unable to persist CursorAgent activity; native execution stopped.') },
+    }, () => { nativeDisposals += 1 })
+    await h.drain()
+
+    await expect(h.adapter.reset()).rejects.toThrow('Unable to persist CursorAgent activity; native execution stopped.')
+    // The runner reset ran anyway, so a later mount cannot re-enter a
+    // half-reset adapter: the native session was disposed exactly once.
+    expect(nativeDisposals).toBe(1)
+    flushFails = false
+  })
+
+  it('runs the runner dispose before rethrowing a flush failure', async () => {
+    const writer = createCursorAgentActivityWriter(tempRoot())
+    const host = activityHost(writer)
+    let flushFails = true
+    let nativeDisposals = 0
+    const h = harness([delta('settled')], {
+      ...host,
+      flushActivityAll: () => { if (flushFails) throw new Error('Unable to persist CursorAgent activity; native execution stopped.') },
+    }, () => { nativeDisposals += 1 })
+    await h.drain()
+
+    await expect(h.adapter.dispose()).rejects.toThrow('Unable to persist CursorAgent activity; native execution stopped.')
+    expect(nativeDisposals).toBe(1)
+    flushFails = false
   })
 })

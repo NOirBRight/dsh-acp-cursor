@@ -28,7 +28,7 @@ import {
   decodeActivityHistory,
   decodeActivityPage,
 } from '../src/activity-contract.js'
-import { ACTIVITY_MAX_PENDING_RECORDS } from '../src/activity-coalescer.js'
+import { ACTIVITY_MAX_PENDING_BYTES, ACTIVITY_MAX_PENDING_RECORDS } from '../src/activity-coalescer.js'
 import { CursorAgentActivityStore, type CursorAgentActivityEvent } from '../src/activity-store.js'
 import { createCursorAgentActivityWriter } from '../src/dsh-plugin.js'
 import { createAcpSettingsRpcHandler, type AcpSettingsRpcDeps } from '../src/rpc.js'
@@ -87,6 +87,8 @@ const ZERO_COUNTERS = {
   failedFlushes: 0,
   pendingRecords: 0,
   pendingRecordsPeak: 0,
+  pendingBytes: 0,
+  pendingBytesPeak: 0,
 } as const
 
 function tempRoot(): string {
@@ -281,6 +283,8 @@ describe('bounded pending memory under a high-volume flood', () => {
     const metrics = writer.metrics.snapshot()
     expect(metrics.pendingRecords).toBe(0)
     expect(metrics.pendingRecordsPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS * SESSIONS.length)
+    expect(metrics.pendingBytes).toBe(0)
+    expect(metrics.pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES * SESSIONS.length)
     expect(metrics.coalescedRecords).toBeGreaterThan(0)
     expect(metrics.failedFlushes).toBe(0)
     // Only flushed batches reach the store, and every buffered record reaches it once.
@@ -296,6 +300,31 @@ describe('bounded pending memory under a high-volume flood', () => {
       // Exact visible text, in order, with no duplication from a retried flush.
       expect(foldAgentTextRecords(records).map(row => row.text).join('')).toBe(expected)
     }
+  })
+
+  it('bounds buffered bytes when JSON escaping multiplies the payload', () => {
+    const root = tempRoot()
+    const writer = createCursorAgentActivityWriter(root)
+    // A control character serializes to six bytes, so 40 records of 4 KiB text
+    // would be ~960 KiB of buffer without a byte ceiling. Distinct trajectories
+    // never merge, so the byte ceiling is the only bound doing the work here.
+    const hostile = '\u0000'.repeat(4096)
+    const arrivals = 40
+    for (let index = 0; index < arrivals; index++) {
+      writer.append('dsh', [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: 'trajectory-' + String(index), kind: 'text', text: hostile } }])
+      expect(writer.metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+      expect(writer.pendingCount('dsh')).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS)
+    }
+    writer.flushAll()
+
+    // Force-flushing is not dropping: every hostile record is durable, intact.
+    const records = durableRecords(root, 'dsh')
+    expect(records).toHaveLength(arrivals)
+    expect(records.every(record => record.type === CURSOR_AGENT_TEXT && record.data.text === hostile)).toBe(true)
+    const metrics = writer.metrics.snapshot()
+    expect(metrics.pendingBytes).toBe(0)
+    expect(metrics.pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    expect(metrics.appendRecords).toBe(metrics.flushRecords)
   })
 })
 

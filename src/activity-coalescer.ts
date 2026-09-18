@@ -1,16 +1,22 @@
 /** Bounded per-session coalescing for CursorAgent native activity.
  *
- * Transient presentation records (thought/text deltas and same-status tool
+ * Transient presentation records (thought/text deltas and a running tool row's
  * output growth) are merged in memory and written as one durable batch, so a
  * fast native turn no longer causes one JSONL append per delta. Every other
  * record keeps today's semantics: it is written before anything that follows
  * it, and it flushes the records it followed, so session readiness, audit,
- * trajectory discovery, user answers, usage, tool starts, tool lifecycle
- * changes and terminal states can never be reordered behind buffered text.
+ * trajectory discovery, user answers, usage, tool starts and every tool
+ * lifecycle change — including a terminal completed/failed state — can never be
+ * reordered behind buffered text or delayed behind the window.
+ *
+ * Each session buffer is bounded independently by three ceilings: buffered
+ * records, one text record, and the serialized bytes of the whole buffer.
+ * Crossing any of them forces a flush; a required record is never dropped.
  *
  * The module is pure apart from the injected sink and clock: no filesystem, no
  * ACP, no imports from the host, so a fake timer fully determines its behavior.
  */
+import { Buffer } from 'node:buffer'
 import {
   CURSOR_AGENT_TEXT,
   CURSOR_AGENT_TOOL_UPDATE,
@@ -22,11 +28,19 @@ import { CursorAgentActivityMetrics, nowMs } from './activity-metrics.js'
 
 /** Transient delivery window; a closed paragraph still flushes immediately. */
 export const ACTIVITY_COALESCE_WINDOW_MS = 400
-/** Hard ceiling on buffered records per session; reaching it forces a flush.
- * With the text ceiling below it also bounds the buffered serialized size. */
+/** Hard ceiling on buffered records per session; reaching it forces a flush. */
 export const ACTIVITY_MAX_PENDING_RECORDS = 64
 /** Hard ceiling on one text record; a longer delta starts a new pending record. */
 export const ACTIVITY_MAX_TEXT_CHARS = 8192
+/** Fixed ceiling on the serialized bytes buffered for one session.
+ *
+ * The record and text ceilings bound how many records and characters may wait,
+ * not their size: JSON escaping can turn one character into six bytes, and a
+ * tool row carries input, output and error. Crossing this ceiling forces a
+ * flush, never a dropped record. It sits above the largest record the per-record
+ * limits can produce (ACTIVITY_MAX_TEXT_CHARS, and the tool text truncation),
+ * so flushing can always restore the budget. */
+export const ACTIVITY_MAX_PENDING_BYTES = 256 * 1024
 /** Non-growing updates a pending tool row absorbs before it is written anyway, so
  * a progress line that only redraws in place still advances for the reader. */
 export const ACTIVITY_TOOL_SKIP_FLUSH = 32
@@ -40,6 +54,8 @@ interface TextPending {
   readonly kind: 'text'
   readonly key: string
   data: CursorAgentAgentTextData & { text: string }
+  /** Serialized bytes of this record, kept so the buffer total stays incremental. */
+  bytes: number
 }
 
 interface ToolPending {
@@ -50,20 +66,47 @@ interface ToolPending {
   readonly base: number
   /** Non-growing updates folded into this record since it last carried progress. */
   skipped: number
+  /** Serialized bytes of this record, kept so the buffer total stays incremental. */
+  bytes: number
 }
 
 type Pending = TextPending | ToolPending
 
 interface SessionBuffer {
+  readonly sessionId: string
   queue: Pending[]
+  /** Serialized bytes of `queue`, so the byte ceiling check is O(1) per append. */
+  bytes: number
   timer: ReturnType<typeof setTimeout> | undefined
   /** A timer-driven flush failed; the next caller-owned operation rethrows it. */
   deferred: Error | undefined
 }
 
-/** Whether this record may be merged with a buffered record of the same kind. */
+/** Statuses that settle a tool row: they are durable when they arrive. */
+function isTerminalToolStatus(status: CursorAgentToolUpdateData['status']): boolean {
+  return status === 'completed' || status === 'failed'
+}
+
+/** Whether this record may wait in the buffer for its window.
+ *
+ * Text deltas and a running row's output growth coalesce. A terminal tool state
+ * does not: a reader must see completed/failed durably as soon as it arrives,
+ * not up to one window later, and it is an ordering barrier in {@link append}.
+ */
 function isCoalescible(event: CursorAgentActivityEvent): boolean {
-  return event.type === CURSOR_AGENT_TEXT || event.type === CURSOR_AGENT_TOOL_UPDATE
+  if (event.type === CURSOR_AGENT_TEXT) return true
+  if (event.type !== CURSOR_AGENT_TOOL_UPDATE) return false
+  return !isTerminalToolStatus(event.data.status)
+}
+
+/** Serialized size of one durable event, the unit the byte ceiling counts. */
+function recordBytes(event: CursorAgentActivityEvent): number {
+  return Buffer.byteLength(JSON.stringify(event), 'utf8')
+}
+
+/** Serialized bytes one appended string value adds to a record, escaping included. */
+function escapedBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8') - 2
 }
 
 /**
@@ -119,6 +162,7 @@ function mergeToolUpdate(pending: ToolPending, next: CursorAgentToolUpdateData):
     toolId: pending.toolId,
     base: pending.base,
     skipped: 0,
+    bytes: pending.bytes,
     data: {
       toolId: next.toolId,
       ...(next.name === undefined && previous.name === undefined ? {} : { name: next.name ?? previous.name }),
@@ -175,6 +219,8 @@ export class CursorAgentActivityCoalescer {
   private readonly sessions = new Map<string, SessionBuffer>()
   /** Buffered records across all sessions, kept so the counters stay O(1) per append. */
   private pendingTotal = 0
+  /** Buffered serialized bytes across all sessions, mirroring {@link pendingTotal}. */
+  private pendingBytes = 0
 
   /** Capture the durable sink and optional timer injection for tests.
    * @param sink - Durable writer; must throw (not reject) so failures reach the turn.
@@ -190,9 +236,10 @@ export class CursorAgentActivityCoalescer {
   /**
    * Route one batch of durable events for one session.
    *
-   * Coalescible records join the buffer; any other record is an ordering
-   * barrier that materializes the buffer first. A previous failed flush stays
-   * fail-closed: nothing is retried and the original error is rethrown.
+   * Coalescible records join the buffer; any other record — a terminal tool
+   * state included — is an ordering barrier that materializes the buffer first
+   * and is then written on arrival. A previous failed flush stays fail-closed:
+   * nothing is retried and the original error is rethrown.
    * @param sessionId - DSH session owning the history.
    * @param events - Durable events in publish order.
    */
@@ -201,17 +248,23 @@ export class CursorAgentActivityCoalescer {
     for (const event of events) {
       if (buffer?.deferred !== undefined) throw buffer.deferred
       if (!isCoalescible(event)) {
-        // Every non-coalescible record is an ordering barrier, including the
-        // session-ready record that opens the next native epoch.
+        // Every non-coalescible record is an ordering barrier, including a
+        // terminal tool state and the session-ready record that opens the next
+        // native epoch.
         if (buffer !== undefined && buffer.queue.length > 0) this.flush(sessionId)
         this.sink.append(sessionId, [event])
         continue
       }
       buffer ??= this.open(sessionId)
       if (buffer.queue.length >= ACTIVITY_MAX_PENDING_RECORDS) this.flush(sessionId)
+      // Charge the arrival before it joins the buffer: when it would cross the
+      // byte ceiling, what is buffered is written first and the arrival starts a
+      // new record instead. Nothing is ever dropped to fit.
+      const bytes = recordBytes(event)
+      this.reserve(buffer, bytes)
       const bounded = event.type === CURSOR_AGENT_TEXT
-        ? this.bufferText(buffer, event.data)
-        : this.bufferToolUpdate(buffer, event.data as CursorAgentToolUpdateData)
+        ? this.bufferText(buffer, event.data, bytes)
+        : this.bufferToolUpdate(buffer, event.data as CursorAgentToolUpdateData, bytes)
       // A boundary or skip-count flush writes the record just buffered, so the
       // appended content is already durable and still in emitted order.
       if (bounded) this.flush(sessionId)
@@ -221,14 +274,23 @@ export class CursorAgentActivityCoalescer {
 
   /**
    * Write every buffered record for one session now.
+   *
+   * An empty queue still reports a deferred timer-flush failure: the batch that
+   * failed is gone, but its error is owed to this caller-owned operation.
    * @param sessionId - DSH session whose buffer must materialize.
    */
   flush(sessionId: string): void {
     const buffer = this.sessions.get(sessionId)
-    if (buffer === undefined || buffer.queue.length === 0) return
+    if (buffer === undefined) return
+    if (buffer.queue.length === 0) {
+      if (buffer.deferred !== undefined) throw buffer.deferred
+      return
+    }
     const batch = buffer.queue
+    const batchBytes = buffer.bytes
     buffer.queue = []
-    this.pendingDelta(-batch.length)
+    buffer.bytes = 0
+    this.pendingDelta(-batch.length, -batchBytes)
     const started = nowMs()
     try {
       // Drop the timer first: a throwing sink must not leave a live timer that
@@ -245,21 +307,31 @@ export class CursorAgentActivityCoalescer {
   }
 
   /** Flush every session; used before adapter teardown.
+   *
+   * One session's failure never abandons another's buffered records: every
+   * buffer is attempted and the first failure is rethrown afterwards.
    * @returns The ids that had buffered records, for diagnostics.
    */
   flushAll(): readonly string[] {
     const flushed: string[] = []
+    let failure: unknown
     for (const [sessionId, buffer] of [...this.sessions]) {
       if (buffer.queue.length === 0 && buffer.deferred === undefined) continue
-      this.flush(sessionId)
       flushed.push(sessionId)
+      try {
+        this.flush(sessionId)
+      } catch (error) {
+        failure ??= error
+      }
     }
+    if (failure !== undefined) throw failure
     return flushed
   }
 
   /**
    * Flush one session and drop its buffer; called when the session is disposed.
-   * A pending flush failure is reported, then the buffer is dropped either way.
+   * A pending flush failure — deferred or fresh — is reported, then the buffer
+   * is dropped either way.
    * @param sessionId - DSH session being disposed.
    */
   release(sessionId: string): void {
@@ -273,7 +345,9 @@ export class CursorAgentActivityCoalescer {
     }
   }
 
-  /** Flush every session and drop all buffers; called on adapter reset. */
+  /** Flush every session and drop all buffers; called on adapter reset.
+   * A flush failure is rethrown after every buffer was attempted and dropped.
+   */
   reset(): void {
     try {
       this.flushAll()
@@ -281,7 +355,8 @@ export class CursorAgentActivityCoalescer {
       for (const buffer of this.sessions.values()) this.clearTimer(buffer)
       this.sessions.clear()
       this.pendingTotal = 0
-      this.metrics?.recordPending(0)
+      this.pendingBytes = 0
+      this.metrics?.recordPending(0, 0)
     }
   }
 
@@ -291,50 +366,83 @@ export class CursorAgentActivityCoalescer {
   }
 
   private open(sessionId: string): SessionBuffer {
-    const buffer: SessionBuffer = { queue: [], timer: undefined, deferred: undefined }
+    const buffer: SessionBuffer = { sessionId, queue: [], bytes: 0, timer: undefined, deferred: undefined }
     this.sessions.set(sessionId, buffer)
     return buffer
   }
 
-  /** Move the buffered-record gauge and mirror it into the counters. */
-  private pendingDelta(records: number): void {
+  /** Move the buffered gauges and mirror them into the counters. */
+  private pendingDelta(records: number, bytes: number): void {
     this.pendingTotal += records
-    this.metrics?.recordPending(this.pendingTotal)
+    this.pendingBytes += bytes
+    this.metrics?.recordPending(this.pendingTotal, this.pendingBytes)
   }
 
-  /** Merge one delta into the pending tail.
+  /**
+   * Hold `bytes` in one session buffer, writing the buffer out first when the
+   * per-session serialized ceiling would be crossed.
+   *
+   * Called before an arrival joins or grows the buffer, so a merged record
+   * cannot push the buffer past the ceiling. Crossing it always means a flush,
+   * never a dropped record; a lone record larger than the ceiling is still
+   * buffered and written, because the per-record limits keep that from being
+   * reachable in practice.
+   * @param buffer - Session buffer that must hold the arrival.
+   * @param bytes - Serialized size of the arrival, charged before it is applied.
+   */
+  private reserve(buffer: SessionBuffer, bytes: number): void {
+    if (buffer.bytes + bytes <= ACTIVITY_MAX_PENDING_BYTES) return
+    if (buffer.queue.length === 0) return
+    // The flushed tail is gone, so a merge finds no record to fold into and
+    // starts a new one: the arrival is never reflected onto a written row.
+    this.flush(buffer.sessionId)
+  }
+
+  /** Merge one delta into the pending tail, or start a new record for it.
    * @param buffer - Session buffer that owns the queue tail.
    * @param data - Decoded native text delta.
+   * @param bytes - Serialized size of the arrival, charged by the caller.
    * @returns Whether the merged text reached a paragraph or closed code block.
    */
-  private bufferText(buffer: SessionBuffer, data: CursorAgentAgentTextData): boolean {
+  private bufferText(buffer: SessionBuffer, data: CursorAgentAgentTextData, bytes: number): boolean {
     const key = textKey(data)
     // Only the queue tail may merge: a record emitted between two deltas must
     // stay between them, or the fold would concatenate across it.
     const last = buffer.queue.at(-1)
     const pending = last?.kind === 'text' && last.key === key ? last : undefined
     if (pending !== undefined && pending.data.text.length + data.text.length <= ACTIVITY_MAX_TEXT_CHARS) {
+      const growth = escapedBytes(data.text)
       pending.data.text += data.text
+      pending.bytes += growth
+      buffer.bytes += growth
+      this.pendingDelta(0, growth)
       this.metrics?.recordCoalesced(1)
       return atTextBoundary(pending.data.text)
     }
-    buffer.queue.push({ kind: 'text', key, data: { ...data } })
-    this.pendingDelta(1)
+    buffer.queue.push({ kind: 'text', key, data: { ...data }, bytes })
+    buffer.bytes += bytes
+    this.pendingDelta(1, bytes)
     return atTextBoundary(data.text)
   }
 
-  /** Merge one tool update into the pending tail.
+  /** Merge one tool update into the pending tail, or start a new record for it.
    * @param buffer - Session buffer that owns the queue tail.
-   * @param data - Decoded native tool update.
+   * @param data - Decoded native tool update; never a terminal state.
+   * @param bytes - Serialized size of the arrival, charged by the caller.
    * @returns Whether the row hit its skip-count flush and must be written now.
    */
-  private bufferToolUpdate(buffer: SessionBuffer, data: CursorAgentToolUpdateData): boolean {
+  private bufferToolUpdate(buffer: SessionBuffer, data: CursorAgentToolUpdateData, bytes: number): boolean {
     // Same tail rule: a tool update may only fold into the row's own latest
     // record while nothing else was emitted after it.
     const last = buffer.queue.at(-1)
     const pending = last?.kind === 'tool' && last.toolId === data.toolId ? last : undefined
     if (pending !== undefined && toolMergeable(pending, data)) {
-      buffer.queue[buffer.queue.length - 1] = mergeToolUpdate(pending, data)
+      const merged = mergeToolUpdate(pending, data)
+      merged.bytes = recordBytes(toEvent(merged))
+      const growth = merged.bytes - pending.bytes
+      buffer.bytes += growth
+      this.pendingDelta(0, growth)
+      buffer.queue[buffer.queue.length - 1] = merged
       this.metrics?.recordCoalesced(1)
       return false
     }
@@ -349,8 +457,9 @@ export class CursorAgentActivityCoalescer {
       this.metrics?.recordCoalesced(1)
       return pending.skipped >= ACTIVITY_TOOL_SKIP_FLUSH
     }
-    buffer.queue.push({ kind: 'tool', toolId: data.toolId, data: { ...data }, base: data.output?.length ?? 0, skipped: 0 })
-    this.pendingDelta(1)
+    buffer.queue.push({ kind: 'tool', toolId: data.toolId, data: { ...data }, base: data.output?.length ?? 0, skipped: 0, bytes })
+    buffer.bytes += bytes
+    this.pendingDelta(1, bytes)
     return false
   }
 
