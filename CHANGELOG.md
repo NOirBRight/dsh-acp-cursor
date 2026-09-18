@@ -1,3 +1,7 @@
+## Unreleased
+
+- Classify standalone Cursor ACP transport dumps as failed native turns and replay the user prompt once in the same Host stream.
+
 ## v0.1.19
 
 - Bound native activity persistence and reads for concurrent Cursor ACP sessions.

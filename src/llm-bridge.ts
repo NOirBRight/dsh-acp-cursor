@@ -8,14 +8,18 @@ import {
   turnId,
   type ExternalAgentPermissionDecision,
   type ExternalAgentPermissionRequest,
+  type ExternalAgentPermissionMode,
   type ExternalAgentProvider,
   type ExternalAgentSessionRef,
+  type ExternalAgentTurnRequest,
   type ExternalAgentTurnResult,
   type ExternalAgentUserInputAnswers,
   type ExternalAgentUserInputRequest,
 } from '@deepseek-ai/dsh-acp-provider'
 import type { StreamChunk, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { applyCatalogOverlay, nativeCursorAgentModelId, peelEffort, pickerGroupsFromCursorCatalog, type CatalogOverlay, type CursorCatalogRow } from './catalog.js'
+import { CURSOR_PLAN_APPROVE_LABEL, CURSOR_PLAN_KEEP_PLANNING_LABEL, CURSOR_PLAN_REVIEW_ID, CURSOR_PLAN_REVIEW_QUESTION, isCursorPlanApproval, isCursorPlanReview, type CursorAgentNativeMode } from './types.js'
+import { switchCursorSessionToAgent } from './interaction.js'
 
 export interface CursorResolvedModel {
   readonly provider: string
@@ -49,10 +53,8 @@ function toResolvedModel(provider: string, requested: string, found: CursorCatal
   }
 }
 import { isRecord } from './decode.js'
+import { dumpFailedNativeTurn } from './transport-dump.js'
 import { CURSOR_AGENT_USER_QUESTION_ANSWER, CURSOR_AGENT_OBSERVED, CURSOR_AGENT_TEXT, CURSOR_AGENT_PARENT_TRAJECTORY, toDurableAgentEvents, toDurableToolEvents, type CursorAgentToolEvent, type CursorAgentOwnedEvent } from './tool-events.js'
-
-const APPROVE_LABEL = 'Approve'
-const KEEP_PLANNING_LABEL = 'Keep planning'
 
 export interface BridgeAskRequest {
   questions: {
@@ -99,6 +101,14 @@ export interface BridgeHost {
    * Only 'allowed-once' grants; every other outcome denies.
    */
   requestApproval?(input: { sessionId: string | undefined; toolName: string; reason?: string; signal?: AbortSignal }): Promise<CursorAgentApprovalOutcome>
+  /** Set DSH Plan after the user approved or a failed agent-mode switch undoes that approval. */
+  setPlanMode?(sessionId: string | undefined, active: boolean): void
+  /**
+   * Live picker selection for this session. Plan review can commit a later
+   * Cursor model before Approve; the in-flight stream still carries the model
+   * from prompt assembly.
+   */
+  resolveSelectedModel?(sessionId: string | undefined): { model: string; reasoningEffort?: string } | undefined
 }
 
 /** Closed outcome of one canonical approval ask. Structural mirror of the approval-service vocabulary. */
@@ -291,26 +301,41 @@ export function createCursorAgentLlmBridge(
       const controller = new AbortController()
       const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
       const policy = hostAsk?.resolvePolicy?.(options.sessionId)
-      const permissionMode = policy?.mode === 'danger-full-access' ? 'full-access' : policy?.mode === 'workspace-write' ? 'auto-accept-edits' : 'approval-required'
+      const permissionMode: ExternalAgentPermissionMode = policy?.mode === 'danger-full-access' ? 'full-access' : policy?.mode === 'workspace-write' ? 'auto-accept-edits' : 'approval-required'
       const natives = await nativeModels()
       if (natives.length === 0) throw new Error('CursorAgent model catalog is unavailable')
       const overlay = getOverlay?.()
-      const row = findCollapsed(applyCatalogOverlay(pickerGroupsFromCursorCatalog(natives), overlay?.order, overlay?.overrides), options.model)
+      const collapsed = applyCatalogOverlay(pickerGroupsFromCursorCatalog(natives), overlay?.order, overlay?.overrides)
+      const row = findCollapsed(collapsed, options.model)
       if (row === undefined) throw new Error('Cursor model is not enabled: ' + options.model)
-      const nativeModel = nativeCursorAgentModelId(options.model, options.reasoningEffort ?? row.reasoning?.defaultEffort, natives.map(model => model.id), natives)
+      const toNative = (logical: string, effort?: string): string => {
+        const found = findCollapsed(collapsed, logical)
+        if (found === undefined) throw new Error('Cursor model is not enabled: ' + logical)
+        return nativeCursorAgentModelId(logical, effort ?? found.reasoning?.defaultEffort, natives.map(model => model.id), natives)
+      }
+      let nativeModel = toNative(options.model, options.reasoningEffort)
       const workspaceRoot = policy?.workspaceRoot
       if (getProvider() !== installed) throw new Error('CursorAgent configuration changed before native execution')
-      const openRequest = {
-        route: createSessionModelRoute('external-agent', String(installed.info.id), nativeModel),
-        session: sessionId(key),
-        permissionMode,
-        fullAccessConfirmed: permissionMode === 'full-access',
-        ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
-        signal,
-      } as const
+      const nativePlan = hostAsk?.isPlanMode?.(options.sessionId) === true
+      let nativeMode: CursorAgentNativeMode | undefined = nativePlan ? 'plan' : undefined
+      let planApproved = false
+      const nativeTurnOpen = () => {
+        const live = hostAsk?.resolveSelectedModel?.(options.sessionId)
+        if (live?.model !== undefined && live.model !== '') nativeModel = toNative(live.model, live.reasoningEffort)
+        return {
+          route: createSessionModelRoute('external-agent', String(installed.info.id), nativeModel),
+          session: sessionId(key),
+          permissionMode,
+          fullAccessConfirmed: permissionMode === 'full-access',
+          ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+          ...(nativeMode === undefined ? {} : { nativeMode }),
+          signal,
+        }
+      }
       type Pending = { kind: 'thought' | 'text'; text: string }
       const pending: Pending[] = []
       let pendingOther: string | undefined
+      let reviewedPlan = false
       let wake: (() => void) | undefined
       // Disclose a child trajectory once per native session from its first owned
       // text/thought linkage. Scoped like emittedToolIds and reset on native open,
@@ -361,6 +386,19 @@ export function createCursorAgentLlmBridge(
         requestPermission: request => decidePermission(request, permissionMode, hostAsk, signal, options.sessionId),
         requestUserInput: async request => {
           const answers = await decideUserInput(request, hostAsk, signal, options.sessionId)
+          if (isCursorPlanReview(request)) {
+            reviewedPlan = true
+            if (isCursorPlanApproval(request, answers)) {
+              try {
+                await switchCursorSessionToAgent(options.sessionId, signal)
+              } catch {
+                return { answers: [] }
+              }
+              planApproved = true
+              nativeMode = 'agent'
+              hostAsk?.setPlanMode?.(options.sessionId, false)
+            }
+          }
           if (answers.custom !== undefined && answers.custom.length > 0) pendingOther = answers.custom
           return answers
         },
@@ -396,8 +434,27 @@ export function createCursorAgentLlmBridge(
       }
       let active: Promise<ExternalAgentTurnResult> | undefined
       const run = (text: string): Promise<ExternalAgentTurnResult> => {
-        active = runner.runTurn(openRequest, { turn: turnId('t' + String(++turns)), prompt: text, permissionMode, signal }, turnHost)
+        const turn: ExternalAgentTurnRequest = {
+          turn: turnId('t' + String(++turns)),
+          prompt: text,
+          permissionMode,
+          signal,
+        }
+        const nativeTurn = nativeMode === undefined ? turn : Object.assign({}, turn, { nativeMode })
+        active = runner.runTurn(nativeTurnOpen(), nativeTurn, turnHost)
         return active
+      }
+      type DrainState = { thought: string; text: string; thoughtOpen: boolean; textOpen: boolean }
+      const continueNativeTurn = async function* (text: string, start: DrainState, assembledSoFar: string): AsyncGenerator<Chunk, DrainState & { status: ExternalAgentTurnResult['status']; error: string | undefined; assembled: string }> {
+        const running = run(text)
+        const nextState = yield* drain(running, start)
+        const next = await running
+        return {
+          ...nextState,
+          status: next.status,
+          error: next.error,
+          assembled: nextState.text.length > 0 ? nextState.text : assembledSoFar + (next.text.length > 0 ? String.fromCharCode(10) + next.text : ''),
+        }
       }
       try {
         const first = run(prompt)
@@ -406,17 +463,31 @@ export function createCursorAgentLlmBridge(
         let finalStatus = result.status
         let finalError = result.error
         let assembled = state.text.length > 0 ? state.text : result.text
+        // Replay the original prompt once when the native turn already failed as a transport dump.
+        if (!signal.aborted && dumpFailedNativeTurn(result)) {
+          const replay = run(prompt)
+          state = yield* drain(replay, { thought: '', text: '', thoughtOpen: false, textOpen: false })
+          const next = await replay
+          finalStatus = next.status
+          finalError = next.error
+          assembled = state.text.length > 0 ? state.text : next.text
+        }
         if (pendingOther !== undefined && pendingOther.length > 0) {
           const extra = pendingOther
           pendingOther = undefined
-          const follow = run(extra)
-          state = yield* drain(follow, state)
-          const next = await follow
-          finalStatus = next.status
-          finalError = next.error
-          assembled = state.text.length > 0 ? state.text : assembled + (next.text.length > 0 ? String.fromCharCode(10) + next.text : '')
+          const followed = yield* continueNativeTurn(extra, state, assembled)
+          state = followed
+          finalStatus = followed.status
+          finalError = followed.error
+          assembled = followed.assembled
         }
-        if (result.status === 'completed' && hostAsk?.isPlanMode?.(options.sessionId) === true && hostAsk.ask !== undefined) {
+        if (result.status === 'completed' && planApproved) {
+          const followed = yield* continueNativeTurn('The user approved the plan. Carry it out now.', state, assembled)
+          state = followed
+          finalStatus = followed.status
+          finalError = followed.error
+          assembled = followed.assembled
+        } else if (result.status === 'completed' && !reviewedPlan && hostAsk?.isPlanMode?.(options.sessionId) === true && hostAsk.ask !== undefined) {
           let approved = false
           try {
             approved = await reviewPlan(assembled, hostAsk, signal, options.sessionId)
@@ -424,12 +495,13 @@ export function createCursorAgentLlmBridge(
             approved = false
           }
           if (approved) {
-            const second = run('The user approved the plan. Carry it out now.')
-            state = yield* drain(second, state)
-            const next = await second
-            finalStatus = next.status
-            finalError = next.error
-            assembled = state.text.length > 0 ? state.text : assembled + (next.text.length > 0 ? String.fromCharCode(10) + next.text : '')
+            nativeMode = 'agent'
+            hostAsk.setPlanMode?.(options.sessionId, false)
+            const followed = yield* continueNativeTurn('The user approved the plan. Carry it out now.', state, assembled)
+            state = followed
+            finalStatus = followed.status
+            finalError = followed.error
+            assembled = followed.assembled
           }
         }
         if (state.thoughtOpen) yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: state.thought } }
@@ -498,6 +570,20 @@ async function decidePermission(
   return rejectOf()
 }
 
+function planReviewQuestion(detail: string): BridgeAskRequest['questions'][number] {
+  return {
+    id: CURSOR_PLAN_REVIEW_ID,
+    header: 'Plan review',
+    question: CURSOR_PLAN_REVIEW_QUESTION,
+    ...(detail.length > 0 ? { detail } : {}),
+    options: [
+      { label: CURSOR_PLAN_APPROVE_LABEL, description: 'Leave plan mode; the plan is carried out from the next step.' },
+      { label: CURSOR_PLAN_KEEP_PLANNING_LABEL, description: 'Stay in plan mode; feedback goes back to the model.' },
+    ],
+    intent: { kind: 'plan-review', approve: CURSOR_PLAN_APPROVE_LABEL },
+  }
+}
+
 async function decideUserInput(
   request: ExternalAgentUserInputRequest,
   hostAsk: BridgeHost | undefined,
@@ -505,12 +591,12 @@ async function decideUserInput(
   sessionId?: string,
 ): Promise<ExternalAgentUserInputAnswers> {
   if (hostAsk?.ask === undefined) return { answers: [] }
-  const options = request.options?.map(label => ({ label }))
+  const planReview = isCursorPlanReview(request)
   const result = await hostAsk.ask({
-    questions: [{
+    questions: [planReview ? planReviewQuestion(request.question) : {
       id: String(request.requestId),
       question: request.question,
-      ...(options === undefined ? {} : { options }),
+      ...(request.options === undefined ? {} : { options: request.options.map(label => ({ label })) }),
       ...(request.multiple === undefined ? {} : { multiSelect: request.multiple }),
     }],
     ...(signal === undefined ? {} : { signal }),
@@ -528,20 +614,10 @@ async function decideUserInput(
 
 async function reviewPlan(plan: string, hostAsk: BridgeHost, signal?: AbortSignal, sessionId?: string): Promise<boolean> {
   const result = await hostAsk.ask!({
-    questions: [{
-      id: 'plan-review',
-      header: 'Plan review',
-      question: 'Approve this plan and leave plan mode?',
-      detail: plan,
-      options: [
-        { label: APPROVE_LABEL, description: 'Leave plan mode; the plan is carried out from the next step.' },
-        { label: KEEP_PLANNING_LABEL, description: 'Stay in plan mode; feedback goes back to the model.' },
-      ],
-      intent: { kind: 'plan-review', approve: APPROVE_LABEL },
-    }],
+    questions: [planReviewQuestion(plan)],
     ...(signal === undefined ? {} : { signal }),
     ...(sessionId === undefined ? {} : { sessionId }),
   })
-  const item = result.answers.find(entry => entry.id === 'plan-review')
-  return item?.selected.length === 1 && item.selected[0] === APPROVE_LABEL && item.custom === undefined
+  const item = result.answers.find(entry => entry.id === CURSOR_PLAN_REVIEW_ID)
+  return item?.selected.length === 1 && item.selected[0] === CURSOR_PLAN_APPROVE_LABEL && item.custom === undefined
 }

@@ -112,6 +112,23 @@ export const CURSOR_AGENT_PERMISSION_MODES: readonly ExternalAgentPermissionMode
   'full-access',
 ]
 
+/** Host question id for Cursor `create_plan` review. */
+export const CURSOR_PLAN_REVIEW_ID = 'plan-review'
+export const CURSOR_PLAN_REVIEW_QUESTION = 'Approve this plan and leave plan mode?'
+export const CURSOR_PLAN_APPROVE_LABEL = 'Approve'
+export const CURSOR_PLAN_KEEP_PLANNING_LABEL = 'Keep planning'
+
+export function isCursorPlanReview(request: { readonly requestId: unknown }): boolean {
+  return String(request.requestId) === CURSOR_PLAN_REVIEW_ID
+}
+
+export function isCursorPlanApproval(request: { readonly requestId: unknown }, answers: { readonly answers: readonly string[]; readonly custom?: string }): boolean {
+  return isCursorPlanReview(request)
+    && answers.custom === undefined
+    && answers.answers.length === 1
+    && answers.answers[0] === CURSOR_PLAN_APPROVE_LABEL
+}
+
 /** Re-export the provider-neutral types used by CursorAgent adapters. */
 export type {
   ExternalAgentAttachment,

@@ -16,7 +16,7 @@ import { cursorAgentSignInRequiredMessage, clearCursorAgentProfile, redactCursor
 import { cursorCliEnvironment, readCursorCliStatus, startCursorCliLogin } from './cli-auth.js'
 import { errorMessage, isRecord } from './decode.js'
 import { buildCursorAgentLaunchSpec, type CursorAgentLaunchSpec, validateCursorAgentInstallation, type CursorAgentInstallationProbe } from './installation.js'
-import { mapPermissionMode, validateCursorAgentIdentity } from './mapping.js'
+import { cursorNativeModeOf, validateCursorAgentIdentity } from './mapping.js'
 import { spawnCursorAgentAcp, type AcpConnection, type StdioAcpOptions } from './protocol.js'
 import { CursorAgentSession } from './session.js'
 import { discoverCursorAcpModels, selectCursorAcpModel } from './model-config.js'
@@ -102,7 +102,7 @@ export class CursorAgentProvider implements ExternalAgentProvider {
       const selectedModel = String(request.route.model)
       const native = request.resumeCursor === undefined ? nativeSessionId(response) : decodeCursorAgentCursor(request.resumeCursor, cursorAgentSessionScope(this.config, cwd))
       await selectCursorAcpModel(connection, { ...(isRecord(response) ? response : {}), sessionId: native }, selectedModel, request.signal)
-      await connection.request('session/set_mode', { sessionId: native, modeId: mapPermissionMode(request.permissionMode) }, request.signal)
+      await connection.request('session/set_mode', { sessionId: native, modeId: cursorNativeModeOf(request) }, request.signal)
       this.assertActive()
       const rawSession = new CursorAgentSession(connection, this.info.id, request.session, native, this.config, cursorAgentSessionScope(this.config, cwd), filesystem, selectedModel)
       const session = new ManagedExternalAgentSession(rawSession)
