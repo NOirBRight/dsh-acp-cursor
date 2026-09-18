@@ -1,3 +1,7 @@
+## Unreleased
+
+- Classify standalone Cursor ACP transport dumps as failed native turns and replay the user prompt once in the same Host stream.
+
 ## v0.1.18
 
 Register catalogId/binding/unknown against providers-ui 0.2.9.
