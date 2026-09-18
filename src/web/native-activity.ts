@@ -220,21 +220,27 @@ export async function loadActivityHistory(rpc: ActivityRpc, sessionId: string, s
 }
 
 /** Read the full validated history; the bootstrap and resynchronization read. */
-async function loadActivityRecords(rpc: ActivityRpc, sessionId: string, signal?: AbortSignal): Promise<readonly CursorAgentActivityRecord[]> {
+async function loadActivityRecords(rpc: ActivityRpc, sessionId: string, signal?: AbortSignal, metrics?: NativeActivityMetrics): Promise<readonly CursorAgentActivityRecord[]> {
+  if (metrics !== undefined) metrics.fullReadCalls += 1
   const result = await rpc.call(ACP_SETTINGS_RPC_CHANNEL, ACTIVITY_ENDPOINT, { sessionId }, signal)
   if (!result.ok) throw new Error(result.error?.message ?? 'CursorAgent activity history is unavailable')
   return decodeActivityHistory(result.value).records
 }
 
 /** Read one bounded page strictly after the retained cursor. */
-async function loadActivityPage(rpc: ActivityRpc, sessionId: string, afterSeq: number, signal: AbortSignal): Promise<CursorAgentActivityPage> {
+async function loadActivityPage(rpc: ActivityRpc, sessionId: string, afterSeq: number, signal: AbortSignal, metrics?: NativeActivityMetrics): Promise<CursorAgentActivityPage> {
   const result = await rpc.call(ACP_SETTINGS_RPC_CHANNEL, ACTIVITY_READ_AFTER_ENDPOINT, { sessionId, afterSeq }, signal)
   if (!result.ok) {
     const message = result.error?.message ?? 'CursorAgent activity history is unavailable'
     if (result.error?.code === ACTIVITY_STALE_CURSOR) throw new StaleActivityCursorError(message)
     throw new Error(message)
   }
-  return decodeActivityPage(result.value, afterSeq)
+  const page = decodeActivityPage(result.value, afterSeq)
+  if (metrics !== undefined) {
+    metrics.pageCalls += 1
+    metrics.pageRecords += page.records.length
+  }
+  return page
 }
 
 /** Host history no longer contains the retained cursor: resynchronize instead of retrying it. */
@@ -254,12 +260,32 @@ export interface NativeHistorySnapshot {
   readonly error?: string
 }
 
+/** Value-free browser-side counters for bounded reads and resynchronizations. */
+export interface NativeActivityMetricsSnapshot {
+  readonly fullReadCalls: number
+  readonly pageCalls: number
+  readonly pageRecords: number
+  readonly resynchronizations: number
+}
+
+interface NativeActivityMetrics {
+  fullReadCalls: number
+  pageCalls: number
+  pageRecords: number
+  resynchronizations: number
+}
+
+function copyNativeActivityMetrics(metrics: NativeActivityMetrics): NativeActivityMetricsSnapshot {
+  return { ...metrics }
+}
+
 /** Shared empty snapshot: subscription teardown leaves no per-session history retained. */
 const EMPTY_NATIVE_HISTORY: NativeHistorySnapshot = { rows: [], agents: [], texts: [] }
 
 interface NativeHistoryEntry {
   state: NativeActivityFoldState
   snapshot: NativeHistorySnapshot
+  metrics: NativeActivityMetrics
   /** Exclusive cursor of the retained state: 0 until a bootstrap completes. */
   cursor: number
   bootstrapped: boolean
@@ -284,7 +310,16 @@ function entryFor(rpc: ActivityRpc, sessionId: string): NativeHistoryEntry {
   }
   let entry = bySession.get(sessionId)
   if (entry === undefined) {
-    entry = { state: createNativeActivityFoldState(), snapshot: EMPTY_NATIVE_HISTORY, cursor: 0, bootstrapped: false, listeners: new Set(), timer: undefined, controller: undefined }
+    entry = {
+      state: createNativeActivityFoldState(),
+      snapshot: EMPTY_NATIVE_HISTORY,
+      metrics: { fullReadCalls: 0, pageCalls: 0, pageRecords: 0, resynchronizations: 0 },
+      cursor: 0,
+      bootstrapped: false,
+      listeners: new Set(),
+      timer: undefined,
+      controller: undefined,
+    }
     bySession.set(sessionId, entry)
   }
   return entry
@@ -309,7 +344,7 @@ function notifyEntry(entry: NativeHistoryEntry): void {
  * @returns True when the retained state was replaced.
  */
 async function bootstrapNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc: ActivityRpc, controller: AbortController): Promise<boolean> {
-  const records = await loadActivityRecords(rpc, sessionId, controller.signal)
+  const records = await loadActivityRecords(rpc, sessionId, controller.signal, entry.metrics)
   if (entry.controller !== controller) return false
   entry.state = applyActivityRecords(createNativeActivityFoldState(), records)
   entry.cursor = records.at(-1)?.seq ?? 0
@@ -323,13 +358,14 @@ async function bootstrapNativeHistory(sessionId: string, entry: NativeHistoryEnt
 async function followNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc: ActivityRpc, controller: AbortController): Promise<boolean> {
   let changed = false
   for (let page = 0; page < NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES; page++) {
-    const next = await loadActivityPage(rpc, sessionId, entry.cursor, controller.signal)
+    const next = await loadActivityPage(rpc, sessionId, entry.cursor, controller.signal, entry.metrics)
     if (entry.controller !== controller) return changed
     changed = changed || next.records.length > 0
     applyActivityRecords(entry.state, next.records)
     entry.cursor = next.nextCursor
     if (!next.hasMore) return changed
   }
+  entry.metrics.resynchronizations += 1
   return (await bootstrapNativeHistory(sessionId, entry, rpc, controller)) || changed
 }
 
@@ -349,6 +385,7 @@ async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, r
     } catch (caught) {
       if (!(caught instanceof StaleActivityCursorError)) throw caught
       // The host history no longer contains this cursor: resynchronize once from a full read.
+      entry.metrics.resynchronizations += 1
       changed = await bootstrapNativeHistory(sessionId, entry, rpc, controller)
     }
   } catch (caught) {
@@ -383,11 +420,12 @@ function scheduleNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc
  * No new framework dependency: plain subscribe/getSnapshot for useSyncExternalStore.
  * @param rpc - Logical-channel RPC face scoping the store lifetime.
  * @param sessionId - DSH session scoping the sidecar read.
- * @returns Shared subscribe/getSnapshot/refresh triple.
+ * @returns Shared subscription, snapshot, refresh, and value-free metrics seams.
  */
 export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
   readonly subscribe: (listener: () => void) => () => void
   readonly getSnapshot: () => NativeHistorySnapshot
+  readonly getMetrics: () => NativeActivityMetricsSnapshot
   readonly refresh: () => void
 } {
   const entry = entryFor(rpc, sessionId)
@@ -411,6 +449,7 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
       }
     },
     getSnapshot: (): NativeHistorySnapshot => entry.snapshot,
+    getMetrics: (): NativeActivityMetricsSnapshot => copyNativeActivityMetrics(entry.metrics),
     refresh: (): void => {
       entry.controller?.abort()
       entry.controller = undefined

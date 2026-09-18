@@ -160,6 +160,7 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
     expect(store.getSnapshot().error).toBeUndefined()
+    expect(store.getMetrics()).toEqual({ fullReadCalls: 2, pageCalls: 0, pageRecords: 0, resynchronizations: 1 })
     expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
   })
 
@@ -176,6 +177,7 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES)
     expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
+    expect(store.getMetrics()).toEqual({ fullReadCalls: 2, pageCalls: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES, pageRecords: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES, resynchronizations: 1 })
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
   })
 

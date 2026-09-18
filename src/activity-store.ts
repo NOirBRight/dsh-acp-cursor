@@ -88,22 +88,8 @@ export class CursorAgentActivityStore extends ExternalAgentActivityStore<CursorA
   }
 }
 
-/** Normalize the provider's typed ahead-of-history failure into the shared stale-cursor error.
- * The exported class covers the normal case; the stable `kind` plus the numeric fields cover a
- * provider copy loaded from another module realm, where `instanceof` cannot match across classes.
- * @param error - Whatever `readAfter` threw.
- * @returns The stale-cursor error to surface, or undefined for any other failure.
- */
+/** Normalize the provider's typed ahead-of-history failure into the shared stale-cursor error. */
 function cursorAhead(error: unknown): ActivityCursorStaleError | undefined {
-  if (error instanceof ExternalAgentActivityCursorAheadError) return new ActivityCursorStaleError(error.afterSeq, error.historyLength)
-  if (!(error instanceof Error) || Reflect.get(error, 'kind') !== 'cursor-ahead') return undefined
-  const afterSeq = Reflect.get(error, 'afterSeq')
-  const historyLength = Reflect.get(error, 'historyLength')
-  if (!isSequence(afterSeq) || !isSequence(historyLength)) return undefined
-  return new ActivityCursorStaleError(afterSeq, historyLength)
-}
-
-/** True for a record count or cursor: a non-negative safe integer. */
-function isSequence(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  if (!(error instanceof ExternalAgentActivityCursorAheadError)) return undefined
+  return new ActivityCursorStaleError(error.afterSeq, error.historyLength)
 }

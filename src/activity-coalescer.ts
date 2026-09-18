@@ -122,7 +122,7 @@ function atTextBoundary(text: string): boolean {
   const fence = text.indexOf('\n')
   if (fence === -1) return false
   const closer = text.indexOf('\n```', fence)
-  return closer !== -1 && /(?:^|\n)[ \t]*$/.test(text.slice(closer + 1))
+  return closer !== -1 && /^\n?[ \t]*$/.test(text.slice(closer + 4))
 }
 
 /** Stable merge key: trajectory, parent and kind must match, undefined included. */
@@ -139,9 +139,9 @@ function textKey(data: CursorAgentAgentTextData): string {
  * the updates it replaces while keeping the first update's fields. A status,
  * name, ownership or location change materializes a record instead, so a
  * lifecycle transition is never hidden behind the window. A redraw that does not
- * extend the buffered value is handled by the skip-count policy in
- * {@link CursorAgentActivityCoalescer} rather than merged here, because folding
- * it would replace the visible value instead of appending to it.
+ * extend the buffered value is handled by the bounded replacement policy below:
+ * the latest row is retained and emitted after a finite skip count, so terminal
+ * redraws cannot flood persistence.
  */
 function toolMergeable(pending: ToolPending, next: CursorAgentToolUpdateData): boolean {
   const previous = pending.data
@@ -200,6 +200,20 @@ function repeatsPendingRow(previous: CursorAgentToolUpdateData, next: CursorAgen
     && equal(next.input, previous.input)
     && equal(next.output, previous.output)
     && equal(next.error, previous.error)
+}
+
+/** A same-row replacement can wait for the finite repaint bound. */
+function repaintMergeable(previous: CursorAgentToolUpdateData, next: CursorAgentToolUpdateData): boolean {
+  const equal = (left: unknown, right: unknown): boolean => left === undefined || right === undefined
+    ? left === right
+    : JSON.stringify(left) === JSON.stringify(right)
+  return next.toolId === previous.toolId
+    && next.status === previous.status
+    && equal(next.name, previous.name)
+    && equal(next.ownership, previous.ownership)
+    && equal(next.location, previous.location)
+    && equal(next.input, previous.input)
+    && (next.output !== undefined || next.error !== undefined)
 }
 
 /** Materialize one pending record back into its durable event. */
@@ -446,13 +460,25 @@ export class CursorAgentActivityCoalescer {
       this.metrics?.recordCoalesced(1)
       return false
     }
+    if (pending !== undefined && repaintMergeable(pending.data, data)) {
+      // A same-row repaint replaces the pending display value, then advances at
+      // the finite skip bound. Fields omitted by the repaint stay preserved.
+      const replacement = mergeToolUpdate(pending, data)
+      replacement.skipped = pending.skipped + 1
+      replacement.bytes = recordBytes(toEvent(replacement))
+      const growth = replacement.bytes - pending.bytes
+      buffer.bytes += growth
+      this.pendingDelta(0, growth)
+      buffer.queue[buffer.queue.length - 1] = replacement
+      this.metrics?.recordCoalesced(1)
+      return replacement.skipped >= ACTIVITY_TOOL_SKIP_FLUSH
+    }
     if (pending !== undefined
       && (data.output ?? '').length <= pending.base
       && (data.output ?? '').startsWith(tailOutput(pending))
       && repeatsPendingRow(pending.data, data)) {
-      // A repaint that repeats the row is not written again: the record stands as
-      // it is, so a field this update omits cannot be erased from the durable row.
-      // A redraw that changes the value or the row still materializes a record.
+      // A repaint that omits fields is absorbed only when it folds to the same
+      // row, so no omitted value can erase the durable state.
       pending.skipped += 1
       this.metrics?.recordCoalesced(1)
       return pending.skipped >= ACTIVITY_TOOL_SKIP_FLUSH

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { providerId, sessionId } from '@deepseek-ai/dsh-acp-provider'
@@ -191,6 +191,27 @@ describe('cursor page reads through the store', () => {
   })
 })
 
+describe('activity filesystem guardrails', () => {
+  it('keeps restrictive modes and rejects a symlinked history', () => {
+    const root = tempRoot()
+    const store = new CursorAgentActivityStore(root)
+    store.append('safe', [readyEvent()])
+
+    expect(statSync(root).mode & 0o777).toBe(0o700)
+    expect(lstatSync(pathFor(root, 'safe')).mode & 0o777).toBe(0o600)
+    symlinkSync(pathFor(root, 'safe'), pathFor(root, 'link'))
+    expect(() => store.read('link')).toThrow()
+  })
+
+  it('fails closed when the history root cannot accept a write', () => {
+    const parent = tempRoot()
+    const rootFile = join(parent, 'not-a-directory')
+    writeFileSync(rootFile, 'root')
+    const store = new CursorAgentActivityStore(rootFile)
+    expect(() => store.append('session', [readyEvent()])).toThrow()
+  })
+})
+
 describe('stale cursor mapping', () => {
   it('maps the provider typed cursor-ahead error and counts one refused cursor', () => {
     const root = tempRoot()
@@ -204,18 +225,6 @@ describe('stale cursor mapping', () => {
     // A refused cursor is not a page: it is the signal that costs one full resynchronizing read.
     expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 0, pageRecords: 0 })
     expect(store.read('dsh').records.map(record => record.seq)).toEqual([1])
-  })
-
-  it('maps a cursor-ahead error from another module realm by its stable kind and shape', () => {
-    const metrics = new CursorAgentActivityMetrics()
-    const store = new CursorAgentActivityStore(tempRoot(), metrics)
-    // A second provider copy cannot satisfy instanceof, and its prose is not a contract:
-    // only the stable kind plus the fields may identify it.
-    const foreign = Object.assign(new Error('cursor 9 ran past the end of this history'), { kind: 'cursor-ahead', afterSeq: 9, historyLength: 1 })
-    vi.spyOn(store, 'readAfter').mockImplementation(() => { throw foreign })
-
-    expect(() => store.readActivityPage('dsh', 9)).toThrow(ActivityCursorStaleError)
-    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 0 })
   })
 
   it('passes any other provider failure through untouched', () => {

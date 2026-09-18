@@ -118,9 +118,9 @@ describe('CursorAgent activity coalescer', () => {
     const coalescer = new CursorAgentActivityCoalescer(sink)
     coalescer.append(SESSION, [text('```ts\nconst x = 1\n')])
     expect(batches).toHaveLength(0)
-    coalescer.append(SESSION, [text('const y = 2\n```\n')])
+    coalescer.append(SESSION, [text('const y = 2\n```')])
     expect(batches).toHaveLength(1)
-    expect(flat().map(event => event.type === CURSOR_AGENT_TEXT ? event.data.text : '')).toEqual(['```ts\nconst x = 1\nconst y = 2\n```\n'])
+    expect(flat().map(event => event.type === CURSOR_AGENT_TEXT ? event.data.text : '')).toEqual(['```ts\nconst x = 1\nconst y = 2\n```'])
   })
 
   it('splits text at the record ceiling without losing or reordering content', () => {
@@ -150,14 +150,13 @@ describe('CursorAgent activity coalescer', () => {
     expect(updates[1]?.data.output).toBe('line 1\nline 2\nline 3')
   })
 
-  it('keeps a redraw that is not output growth', () => {
+  it('coalesces changed non-growing redraws and keeps the latest value', () => {
     const { sink, flat } = recorder()
     const coalescer = new CursorAgentActivityCoalescer(sink)
     for (let index = 0; index < 4; index++) coalescer.append(SESSION, [toolUpdate('t1', 'running', String(index).repeat(4))])
     coalescer.flush(SESSION)
-    // A constant-length redraw replaces the value instead of growing it, so it is
-    // written rather than hidden behind the window.
-    expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.output : '')).toEqual(['0000', '1111', '2222', '3333'])
+    // A constant-length terminal redraw is a bounded replacement, not one write per repaint.
+    expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.output : '')).toEqual(['3333'])
   })
 
   it('collapses a repaint that repeats the same value and flushes at the skip count', () => {
