@@ -41,7 +41,6 @@ function ThoughtRow({ branch, ...labels }: { branch: Extract<NativeActivityBranc
       open={open}
       expandable={branch.text.length > 0}
       expandOnRowClick
-      keepContentWhenOpen
       onToggle={() => { setOpen(value => !value) }}
       collapsedContent={summary === '' ? null : <span style={{ minWidth: 0, overflow: 'hidden', color: 'var(--dsw-alias-label-tertiary)', fontSize: 14, lineHeight: '24px', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{' \u00b7 ' + summary}</span>}
     >
