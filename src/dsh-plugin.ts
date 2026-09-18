@@ -305,6 +305,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
     snapshot,
     quota: async (signal) => quotaReader.snapshot(signal),
     readActivity: sessionId => activity.read(sessionId),
+    readActivityAfter: (sessionId, afterSeq) => activity.readActivityPage(sessionId, afterSeq),
     catalog: async () => {
       if (installed === undefined) return { groups: [] }
       if ('status' in await validateCursorAgentInstallation(toProviderConfig(live))) return { groups: [] }

@@ -4,9 +4,14 @@ import { promisify } from 'node:util'
 import {
   ACTIVITY_BINDING_ENDPOINT,
   ACTIVITY_ENDPOINT,
+  ACTIVITY_READ_AFTER_ENDPOINT,
+  ACTIVITY_STALE_CURSOR,
+  ActivityCursorStaleError,
+  decodeActivityPageRequest,
   decodeActivitySessionId,
   nativeSessionBinding,
   type CursorAgentActivityHistory,
+  type CursorAgentActivityPage,
 } from './activity-contract.js'
 import {
   ACP_SETTINGS_RPC_CHANNEL,
@@ -43,6 +48,7 @@ export interface AcpSettingsRpcDeps {
   catalog(): Promise<{ groups: readonly { id: string; name: string; models: readonly { id: string; name: string; reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort: string } }[] }[] }>
   quota(signal?: AbortSignal): Promise<CursorAgentQuotaSnapshot>
   readActivity(sessionId: string): CursorAgentActivityHistory
+  readActivityAfter(sessionId: string, afterSeq: number): CursorAgentActivityPage
   applyConfig(config: AcpCursorAgentSettingsConfig): Promise<void>
   run(action: string, value?: unknown, signal?: AbortSignal): Promise<unknown>
 }
@@ -70,6 +76,16 @@ export function createAcpSettingsRpcHandler(deps: AcpSettingsRpcDeps): (endpoint
         }
         return { ok: true, value: history }
       } catch (error) {
+        return fail(activityError(error))
+      }
+    }
+    if (endpoint === ACTIVITY_READ_AFTER_ENDPOINT) {
+      const request = decodeActivityPageRequest(payload)
+      if (request === undefined) return fail('invalid CursorAgent activity request')
+      try {
+        return { ok: true, value: await deps.readActivityAfter(request.sessionId, request.afterSeq) }
+      } catch (error) {
+        if (error instanceof ActivityCursorStaleError) return { ok: false, error: { code: ACTIVITY_STALE_CURSOR, message: 'CursorAgent activity cursor is stale; the history must be reloaded.' } }
         return fail(activityError(error))
       }
     }
