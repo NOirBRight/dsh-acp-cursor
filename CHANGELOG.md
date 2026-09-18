@@ -2,6 +2,7 @@
 
 - Bound native activity persistence and reads for concurrent Cursor ACP sessions.
 - Coalesce transient text/tool updates and flush durable activity at turn and lifecycle boundaries.
+- Treat a cursor whose CursorAgent history was deleted as stale, so the browser resynchronizes instead of reading an empty caught-up page (provider 0.1.5).
 
 ## v0.1.18
 

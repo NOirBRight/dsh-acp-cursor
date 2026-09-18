@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { providerId, sessionId } from '@deepseek-ai/dsh-acp-provider'
+import { ExternalAgentActivityCursorAheadError } from '@deepseek-ai/dsh-acp-provider/activity-store'
 import { describe, expect, it, vi } from 'vitest'
 import {
   ACTIVITY_BINDING_ENDPOINT,
@@ -17,6 +18,7 @@ import {
   nativeSessionBinding,
 } from '../src/activity-contract.js'
 import { CursorAgentActivityStore, type CursorAgentActivityEvent } from '../src/activity-store.js'
+import { CursorAgentActivityMetrics } from '../src/activity-metrics.js'
 import { createAcpSettingsRpcHandler, type AcpSettingsRpcDeps } from '../src/rpc.js'
 import {
   CURSOR_AGENT_SESSION_READY,
@@ -186,6 +188,84 @@ describe('cursor page reads through the store', () => {
     writeFileSync(pathFor(root, 'broken'), JSON.stringify({ v: 1, seq: 1, time, type: CURSOR_AGENT_SESSION_READY, data: { provider: 'cursor-agent' } }) + '\n{"v":1,', { mode: 0o600 })
     const store = new CursorAgentActivityStore(root)
     expect(() => store.readActivityPage('broken', 0)).toThrow(/incomplete trailing record|not JSON/)
+  })
+})
+
+describe('stale cursor mapping', () => {
+  it('maps the provider typed cursor-ahead error and counts one refused cursor', () => {
+    const root = tempRoot()
+    const metrics = new CursorAgentActivityMetrics()
+    const store = new CursorAgentActivityStore(root, metrics)
+    store.append('dsh', [readyEvent()])
+
+    // The provider owns the refusal and types it; the store owns the DSH wire contract.
+    expect(() => store.readAfter('dsh', 9, ACTIVITY_PAGE_RECORD_LIMIT)).toThrow(ExternalAgentActivityCursorAheadError)
+    expect(() => store.readActivityPage('dsh', 9)).toThrow(ActivityCursorStaleError)
+    // A refused cursor is not a page: it is the signal that costs one full resynchronizing read.
+    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 0, pageRecords: 0 })
+    expect(store.read('dsh').records.map(record => record.seq)).toEqual([1])
+  })
+
+  it('maps a cursor-ahead error from another module realm by its stable kind and shape', () => {
+    const metrics = new CursorAgentActivityMetrics()
+    const store = new CursorAgentActivityStore(tempRoot(), metrics)
+    // A second provider copy cannot satisfy instanceof, and its prose is not a contract:
+    // only the stable kind plus the fields may identify it.
+    const foreign = Object.assign(new Error('cursor 9 ran past the end of this history'), { kind: 'cursor-ahead', afterSeq: 9, historyLength: 1 })
+    vi.spyOn(store, 'readAfter').mockImplementation(() => { throw foreign })
+
+    expect(() => store.readActivityPage('dsh', 9)).toThrow(ActivityCursorStaleError)
+    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 0 })
+  })
+
+  it('passes any other provider failure through untouched', () => {
+    for (const failure of [
+      Object.assign(new Error('unrelated'), { kind: 'something-else', afterSeq: 9, historyLength: 1 }),
+      Object.assign(new Error('partial shape'), { kind: 'cursor-ahead', afterSeq: '9', historyLength: 1 }),
+      Object.assign(new Error('no kind'), { afterSeq: 9, historyLength: 1 }),
+    ]) {
+      const metrics = new CursorAgentActivityMetrics()
+      const store = new CursorAgentActivityStore(tempRoot(), metrics)
+      vi.spyOn(store, 'readAfter').mockImplementation(() => { throw failure })
+      expect(() => store.readActivityPage('dsh', 9)).toThrow(failure.message)
+      expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 0, pageCalls: 0 })
+    }
+  })
+
+  it('treats a followed cursor whose history was deleted as stale, never as caught up', () => {
+    const root = tempRoot()
+    const metrics = new CursorAgentActivityMetrics()
+    const store = new CursorAgentActivityStore(root, metrics)
+    store.append('dsh', [readyEvent(), startEvent('t1')])
+    const cursor = store.readActivityPage('dsh', 0).nextCursor
+    expect(cursor).toBe(2)
+
+    rmSync(pathFor(root, 'dsh'))
+    expect(() => store.readActivityPage('dsh', cursor)).toThrow(ActivityCursorStaleError)
+    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 1, pageRecords: 2 })
+  })
+
+  it('leaves cursor 0 an ordinary empty page for a history that is unknown or deleted', () => {
+    const root = tempRoot()
+    const metrics = new CursorAgentActivityMetrics()
+    const store = new CursorAgentActivityStore(root, metrics)
+    const empty = { version: ACTIVITY_SCHEMA_VERSION, records: [], nextCursor: 0, hasMore: false }
+
+    // Nothing was being followed yet, so there is no stale cursor to report for either case.
+    expect(store.readActivityPage('unknown', 0)).toEqual(empty)
+    store.append('dsh', [readyEvent()])
+    rmSync(pathFor(root, 'dsh'))
+    expect(store.readActivityPage('dsh', 0)).toEqual(empty)
+    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 0, pageCalls: 2, pageRecords: 0 })
+  })
+
+  it('keeps a caught-up read on an existing history an empty page, not a stale cursor', () => {
+    const metrics = new CursorAgentActivityMetrics()
+    const store = new CursorAgentActivityStore(tempRoot(), metrics)
+    store.append('dsh', [readyEvent()])
+
+    expect(store.readActivityPage('dsh', 1)).toEqual({ version: ACTIVITY_SCHEMA_VERSION, records: [], nextCursor: 1, hasMore: false })
+    expect(metrics.snapshot()).toMatchObject({ staleCursorCalls: 0, pageCalls: 1, pageRecords: 0 })
   })
 })
 

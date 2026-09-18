@@ -1,5 +1,5 @@
 /** Append-only per-session history for CursorAgent native tool activity. */
-import { ExternalAgentActivityStore } from '@deepseek-ai/dsh-acp-provider/activity-store'
+import { ExternalAgentActivityCursorAheadError, ExternalAgentActivityStore, type ExternalAgentActivityPage } from '@deepseek-ai/dsh-acp-provider/activity-store'
 import {
   ACTIVITY_PAGE_RECORD_LIMIT,
   ACTIVITY_SCHEMA_VERSION,
@@ -55,30 +55,55 @@ export class CursorAgentActivityStore extends ExternalAgentActivityStore<CursorA
 
   /** Read one bounded page strictly after an exclusive cursor, validating from that base sequence.
    * Delegates to the provider's `readAfter`, so only the returned records are decoded and the
-   * already-seen prefix is never rescanned into memory.
+   * already-seen prefix is never rescanned into memory. A cursor past an existing history and a
+   * cursor whose history was deleted both surface as {@link ActivityCursorStaleError}, so a client
+   * resynchronizes instead of treating an empty page as caught up; `afterSeq` 0 keeps returning an
+   * ordinary empty page, because nothing was being followed yet.
    * @param sessionId - Required session id.
    * @param afterSeq - Exclusive cursor; 0 starts at the first record.
    * @returns Ordered records, the cursor to pass next, and whether more remain.
+   * @throws ActivityCursorStaleError - When the history cannot satisfy the cursor.
    */
   readActivityPage(sessionId: string, afterSeq: number): CursorAgentActivityPage {
     const started = nowMs()
+    let page: ExternalAgentActivityPage<CursorAgentActivityRecord>
     try {
-      const page = this.readAfter(sessionId, afterSeq, ACTIVITY_PAGE_RECORD_LIMIT)
-      this.metrics?.recordPage(page.records.length, nowMs() - started)
-      return { version: ACTIVITY_SCHEMA_VERSION, records: page.records, nextCursor: page.nextCursor, hasMore: page.hasMore }
+      page = this.readAfter(sessionId, afterSeq, ACTIVITY_PAGE_RECORD_LIMIT)
     } catch (error) {
-      const stale = cursorAhead(error, afterSeq)
+      const stale = cursorAhead(error)
       // A refused cursor is what makes a client resynchronize, so count it here
       // rather than where the wire error code is minted.
       if (stale !== undefined) this.metrics?.recordStaleCursor()
       throw stale ?? error
     }
+    if (afterSeq > 0 && page.historyMissing === true) {
+      // The history file is gone, so this empty page would read as caught up and the
+      // client would never resynchronize. The store boundary refuses the cursor
+      // instead of widening the DSH page DTO with a provider-only field.
+      this.metrics?.recordStaleCursor()
+      throw new ActivityCursorStaleError(afterSeq, 0)
+    }
+    this.metrics?.recordPage(page.records.length, nowMs() - started)
+    return { version: ACTIVITY_SCHEMA_VERSION, records: page.records, nextCursor: page.nextCursor, hasMore: page.hasMore }
   }
 }
 
-/** Normalize the provider's plain ahead-of-history failure into the shared stale-cursor error. */
-function cursorAhead(error: unknown, afterSeq: number): ActivityCursorStaleError | undefined {
-  if (!(error instanceof Error)) return undefined
-  const match = /^External agent activity cursor \d+ is ahead of the (\d+)-record history$/.exec(error.message)
-  return match === null ? undefined : new ActivityCursorStaleError(afterSeq, Number(match[1]))
+/** Normalize the provider's typed ahead-of-history failure into the shared stale-cursor error.
+ * The exported class covers the normal case; the stable `kind` plus the numeric fields cover a
+ * provider copy loaded from another module realm, where `instanceof` cannot match across classes.
+ * @param error - Whatever `readAfter` threw.
+ * @returns The stale-cursor error to surface, or undefined for any other failure.
+ */
+function cursorAhead(error: unknown): ActivityCursorStaleError | undefined {
+  if (error instanceof ExternalAgentActivityCursorAheadError) return new ActivityCursorStaleError(error.afterSeq, error.historyLength)
+  if (!(error instanceof Error) || Reflect.get(error, 'kind') !== 'cursor-ahead') return undefined
+  const afterSeq = Reflect.get(error, 'afterSeq')
+  const historyLength = Reflect.get(error, 'historyLength')
+  if (!isSequence(afterSeq) || !isSequence(historyLength)) return undefined
+  return new ActivityCursorStaleError(afterSeq, historyLength)
+}
+
+/** True for a record count or cursor: a non-negative safe integer. */
+function isSequence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }

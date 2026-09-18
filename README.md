@@ -15,7 +15,7 @@ Requires `dsh-llm-providers-ui` 0.2.8 on the Host (shared ProviderDetail templat
 ```sh
 dsh plugin --profile web add --force \
   https://github.com/NOirBRight/dsh-llm-providers-ui/releases/download/v0.2.9/dsh-llm-providers-ui-0.2.9.tgz \
-  https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.4/deepseek-ai-dsh-acp-provider-0.1.4.tgz \
+  https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.5/deepseek-ai-dsh-acp-provider-0.1.5.tgz \
   https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.19/deepseek-ai-dsh-acp-cursor-0.1.19.tgz
 ```
 

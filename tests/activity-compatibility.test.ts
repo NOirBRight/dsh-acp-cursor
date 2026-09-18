@@ -4,7 +4,7 @@
  * record means: histories written by an older build stay readable without a
  * migration or a rewrite, a restarted store continues the same sequence, the
  * binding/authorization/lifecycle records a native turn depends on survive
- * coalescing, and the provider dependency stays pinned to the v0.1.4 source of
+ * coalescing, and the provider dependency stays pinned to the v0.1.5 source of
  * the store contract.
  */
 import { createHash } from 'node:crypto'
@@ -259,18 +259,22 @@ describe('cursor reads across a stale history', () => {
 })
 
 describe('provider resolution', () => {
-  it('pins the published v0.1.4 tarball and resolves the store contract from it', async () => {
+  it('pins the published v0.1.5 tarball and resolves the store contract from it', async () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { dependencies: Record<string, string> }
     expect(manifest.dependencies['@deepseek-ai/dsh-acp-provider']).toBe(
-      'https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.4/deepseek-ai-dsh-acp-provider-0.1.4.tgz',
+      'https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.5/deepseek-ai-dsh-acp-provider-0.1.5.tgz',
     )
     const installed = JSON.parse(readFileSync(new URL('../node_modules/@deepseek-ai/dsh-acp-provider/package.json', import.meta.url), 'utf8')) as { version: string }
-    expect(installed.version).toBe('0.1.4')
+    expect(installed.version).toBe('0.1.5')
 
     // The local store is the provider's store, so the O(1) cursor contract follows the pin.
     const provider = await import('@deepseek-ai/dsh-acp-provider/activity-store')
     expect(Object.getPrototypeOf(CursorAgentActivityStore.prototype)).toBe(provider.ExternalAgentActivityStore.prototype)
     expect(ACTIVITY_PAGE_RECORD_LIMIT).toBe(provider.EXTERNAL_AGENT_ACTIVITY_MAX_PAGE_RECORDS)
+    // v0.1.5 surfaces a deleted history and types the refused cursor; the store maps both,
+    // so a pin that lost either export must fail here rather than at runtime.
+    expect(typeof provider.ExternalAgentActivityCursorAheadError).toBe('function')
+    expect(new provider.ExternalAgentActivityCursorAheadError(9, 4)).toMatchObject({ kind: 'cursor-ahead', afterSeq: 9, historyLength: 4 })
   })
 
   it.runIf(process.env.DSH_ACP_PROVIDER_SRC !== undefined)('aliases the same provider from the source checkout when asked', async () => {
