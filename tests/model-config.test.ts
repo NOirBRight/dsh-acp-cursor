@@ -78,3 +78,35 @@ it('keeps Fast Max parameters on the actual first and subsequent turns', async (
   expect(request.mock.calls.some(call=>call[0]==='session/set_config_option')).toBe(false)
   await session.dispose()
 })
+
+it('applies a later model selection on a plan-mode turn', async () => {
+  const request = vi.fn(async (method: string, _params?: unknown): Promise<unknown> => method === 'session/prompt' ? { stopReason: 'end_turn' } : response)
+  const connection = { request, notify: vi.fn(), setRequestHandler: vi.fn(), setNotificationHandler: vi.fn(), close: async () => undefined }
+  const session = new CursorAgentSession(connection, providerId('cursor-agent'), sessionId('host'), 's', { executablePath:'/bin/cursor-agent', harnessPath:'', stateDirectory:'/tmp/acp', instanceId:providerInstanceId('plan-model') }, 'scope')
+  const host: ExternalAgentTurnHost = { publish: vi.fn(), requestPermission: async () => ({kind:'cancel'}), requestUserInput: async () => ({answers:[]}) }
+  const turn = {
+    turn: turnId('plan-first'),
+    model: modelId('claude-opus-5'),
+    prompt: 'plan',
+    permissionMode: 'approval-required' as const,
+    nativeMode: 'plan' as const,
+    signal: new AbortController().signal,
+  }
+  expect((await session.runTurn(turn, host)).status).toBe('completed')
+  request.mockClear()
+  expect((await session.runTurn({
+    ...turn,
+    turn: turnId('plan-second'),
+    model: modelId('claude-opus-5[context=1m,effort=high,fast=true]'),
+  }, host)).status).toBe('completed')
+  expect(request.mock.calls.filter(call => call[0] === 'session/set_config_option').map(call => call[1])).toEqual([
+    {sessionId:'s',configId:'model',value:'claude-opus-5'},
+    {sessionId:'s',configId:'context',value:'1m'},
+    {sessionId:'s',configId:'effort',value:'high'},
+    {sessionId:'s',configId:'fast',value:'true'},
+  ])
+  expect(request.mock.calls.filter(call => call[0] === 'session/set_mode').map(call => call[1])).toEqual([
+    { sessionId: 's', modeId: 'plan' },
+  ])
+  await session.dispose()
+})

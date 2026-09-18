@@ -18,12 +18,12 @@ import { encodeCursorAgentCursor } from './native-ref.js'
 import { acpUsage } from './usage.js'
 import { decodeRequestTelemetry, decodeUsageSnapshots, type CursorAgentUsageEvent } from './request-telemetry.js'
 import { errorMessage, isRecord, stringValue } from './decode.js'
-import { createCursorAgentInteractionHandler } from './interaction.js'
-import { mapPermissionMode, normalizeCursorAgentSessionUpdate } from './mapping.js'
+import { createCursorAgentInteractionHandler, registerCursorAgentModeSwitch } from './interaction.js'
+import { cursorNativeModeOf, normalizeCursorAgentSessionUpdate } from './mapping.js'
 import type { AcpConnection } from './protocol.js'
 import { selectCursorAcpModel } from './model-config.js'
 import { standaloneTransportDump } from './transport-dump.js'
-import { CURSOR_AGENT_PERMISSION_MODES, type CursorAgentClientFilesystem, type CursorAgentProviderConfig } from './types.js'
+import { CURSOR_AGENT_PERMISSION_MODES, isCursorPlanApproval, type CursorAgentClientFilesystem, type CursorAgentProviderConfig } from './types.js'
 
 /** One provider-native session with turn-scoped host callbacks. */
 export class CursorAgentSession implements ExternalAgentSession {
@@ -54,7 +54,17 @@ export class CursorAgentSession implements ExternalAgentSession {
     const maxTextBytes = this.config.maxEventTextBytes ?? 1024 * 1024
     const bounds: ExternalAgentEventBounds = { maxTextBytes, maxPayloadBytes: this.config.maxEventPayloadBytes ?? 16 * 1024 * 1024 }
     const boundedHost = withBoundedExternalAgentHost(host, bounds)
-    const handler = createCursorAgentInteractionHandler(boundedHost, this.filesystem, bounds)
+    const releaseAgentSwitch = registerCursorAgentModeSwitch(String(this.ref.session), signal => this.connection.request('session/set_mode', { sessionId: this.nativeId, modeId: 'agent' }, signal ?? request.signal).then(() => undefined))
+    const handlerHost: ExternalAgentTurnHost = {
+      ...boundedHost,
+      requestUserInput: async userInput => {
+        const answers = await boundedHost.requestUserInput(userInput)
+        if (!isCursorPlanApproval(userInput, answers)) return answers
+        await this.connection.request('session/set_mode', { sessionId: this.nativeId, modeId: 'agent' }, request.signal)
+        return answers
+      },
+    }
+    const handler = createCursorAgentInteractionHandler(handlerHost, this.filesystem, bounds)
     this.connection.setRequestHandler(handler)
     this.connection.setNotificationHandler((method, params) => {
       if (method !== 'session/update' || protocolFailure !== undefined) return
@@ -88,7 +98,7 @@ export class CursorAgentSession implements ExternalAgentSession {
         await selectCursorAcpModel(this.connection, { sessionId: this.nativeId }, String(request.model), request.signal)
         this.selectedModel = String(request.model)
       }
-      await this.connection.request('session/set_mode', { sessionId: this.nativeId, modeId: mapPermissionMode(request.permissionMode) }, request.signal)
+      await this.connection.request('session/set_mode', { sessionId: this.nativeId, modeId: cursorNativeModeOf(request) }, request.signal)
       const response = await this.connection.request('session/prompt', { sessionId: this.nativeId, prompt }, request.signal)
       await events
       if (publishFailure !== undefined) throw publishFailure
@@ -106,6 +116,7 @@ export class CursorAgentSession implements ExternalAgentSession {
       if (request.signal.aborted || isAbortError(error)) return { status: 'cancelled', text, nativeSessionId: this.nativeSession }
       return { status: 'failed', text, nativeSessionId: this.nativeSession, error: redactCursorAgentText(errorMessage(error)) }
     } finally {
+      releaseAgentSwitch()
       request.signal.removeEventListener('abort', onAbort)
       this.connection.setRequestHandler(undefined)
       this.connection.setNotificationHandler(undefined)

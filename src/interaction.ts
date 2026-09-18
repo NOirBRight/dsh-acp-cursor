@@ -2,7 +2,21 @@ import { HostExpiredError, TurnAbortedError, UnscopedAllowAlwaysError, boundExte
 import { isRecord, stringValue } from './decode.js'
 import { createCursorAgentFilesystemHandler } from './filesystem.js'
 import type { AcpRequestHandler } from './protocol.js'
-import type { CursorAgentClientFilesystem } from './types.js'
+import { CURSOR_PLAN_APPROVE_LABEL, CURSOR_PLAN_KEEP_PLANNING_LABEL, CURSOR_PLAN_REVIEW_ID, CURSOR_PLAN_REVIEW_QUESTION, isCursorPlanApproval, type CursorAgentClientFilesystem } from './types.js'
+
+const agentModeSwitches = new Map<string, (signal?: AbortSignal) => Promise<void>>()
+
+/** Register this native session's ACP `session/set_mode` for a later Approve. */
+export function registerCursorAgentModeSwitch(sessionId: string, fn: (signal?: AbortSignal) => Promise<void>): () => void {
+  agentModeSwitches.set(sessionId, fn)
+  return () => { if (agentModeSwitches.get(sessionId) === fn) agentModeSwitches.delete(sessionId) }
+}
+
+/** Switch Cursor to agent; no-op when this DSH session has no live ACP turn. */
+export async function switchCursorSessionToAgent(sessionId: string | undefined, signal?: AbortSignal): Promise<void> {
+  if (sessionId === undefined) return
+  await agentModeSwitches.get(sessionId)?.(signal)
+}
 
 /** Build ACP server-request handling from one turn-scoped DSH host. */
 export function createCursorAgentInteractionHandler(host: ExternalAgentTurnHost, filesystem?: CursorAgentClientFilesystem, bounds?: ExternalAgentEventBounds): AcpRequestHandler {
@@ -20,6 +34,10 @@ export function createCursorAgentInteractionHandler(host: ExternalAgentTurnHost,
       if (method.includes('permission')) return handlePermission(host, params, requestKey)
       return questionResponse(await host.requestUserInput(parseQuestionRequest(params, requestKey)))
     }
+    if (method === 'cursor/create_plan') return handleCreatePlan(host, params, bounds)
+    if (method === 'cursor/ask_question') return handleAskQuestion(host, params, requestKey, bounds)
+    // Unanswered cursor/* client methods leave session/prompt hanging.
+    if (method.startsWith('cursor/')) return { outcome: { outcome: 'cancelled' } }
     if (method.startsWith('terminal/')) throw new Error('CursorAgent terminal capability is disabled')
     if ((method === 'fs/read_text_file' || method === 'fs/write_text_file') && fileHandler !== undefined) return fileHandler(method, params, id)
     throw new Error('CursorAgent client method is unavailable: ' + method)
@@ -27,6 +45,26 @@ export function createCursorAgentInteractionHandler(host: ExternalAgentTurnHost,
 }
 
 function isInteractionAbort(error: unknown): boolean { return error instanceof TurnAbortedError || error instanceof HostExpiredError || error instanceof DOMException && error.name === 'AbortError' }
+
+type HostUserAnswer = Awaited<ReturnType<ExternalAgentTurnHost['requestUserInput']>>
+
+async function askUser(host: ExternalAgentTurnHost, rawRequest: ExternalAgentUserInputRequest, bounds: ExternalAgentEventBounds | undefined): Promise<{ answer: HostUserAnswer; presented: ExternalAgentUserInputRequest } | undefined> {
+  const presented = bounds === undefined ? rawRequest : boundExternalAgentUserInputRequest(rawRequest, bounds)
+  try {
+    return { answer: await host.requestUserInput(presented), presented }
+  } catch (error) {
+    if (isInteractionAbort(error)) return undefined
+    throw error
+  }
+}
+
+async function askUserOrCancel(host: ExternalAgentTurnHost, rawRequest: ExternalAgentUserInputRequest, bounds: ExternalAgentEventBounds | undefined): Promise<HostUserAnswer | undefined> {
+  try {
+    return (await askUser(host, rawRequest, bounds))?.answer
+  } catch {
+    return undefined
+  }
+}
 
 function isInteractionQuestion(params: unknown): boolean {
   if (!isRecord(params) || !isRecord(params.toolCall)) return false
@@ -43,21 +81,80 @@ async function handleInteractionQuestion(host: ExternalAgentTurnHost, params: un
   })
   if (new Set(options.map(option => option.native)).size !== options.length) throw new Error('CursorAgent user question option IDs must be unique')
   const rawRequest: ExternalAgentUserInputRequest = { requestId: optionId(id), question: stringValue(params.toolCall.title)?.trim() || 'Choose an option.', options: options.map(option => option.label), multiple: false }
-  const request = bounds === undefined ? rawRequest : boundExternalAgentUserInputRequest(rawRequest, bounds)
-  let answer: Awaited<ReturnType<ExternalAgentTurnHost['requestUserInput']>>
-  try {
-    answer = await host.requestUserInput(request)
-  } catch (error) {
-    if (isInteractionAbort(error)) return { outcome: { outcome: 'cancelled' } }
-    throw error
-  }
+  const asked = await askUser(host, rawRequest, bounds)
+  if (asked === undefined) return { outcome: { outcome: 'cancelled' } }
+  const { answer, presented } = asked
   if (answer.answers.length !== 1) return { outcome: { outcome: 'cancelled' } }
   const exact = options.find(option => option.native === answer.answers[0])
-  const matchingLabels = options.filter((_option, index) => request.options?.[index] === answer.answers[0])
+  const matchingLabels = options.filter((_option, index) => presented.options?.[index] === answer.answers[0])
   const selected = answer.custom === undefined ? exact ?? (matchingLabels.length === 1 ? matchingLabels[0] : undefined) : undefined
   if (selected !== undefined) return { outcome: { outcome: 'selected', optionId: selected.native } }
   // Stock ACP has no freeform: Other cancels this ask; the bridge sends the text as a later prompt.
   return { outcome: { outcome: 'cancelled' } }
+}
+
+async function handleCreatePlan(host: ExternalAgentTurnHost, params: unknown, bounds: ExternalAgentEventBounds | undefined): Promise<unknown> {
+  const plan = formatCreatePlan(params)
+  const rawRequest: ExternalAgentUserInputRequest = {
+    requestId: optionId(CURSOR_PLAN_REVIEW_ID),
+    question: plan.length > 0 ? plan : CURSOR_PLAN_REVIEW_QUESTION,
+    options: [CURSOR_PLAN_APPROVE_LABEL, CURSOR_PLAN_KEEP_PLANNING_LABEL],
+    multiple: false,
+  }
+  const answer = await askUserOrCancel(host, rawRequest, bounds)
+  if (answer === undefined) return { outcome: { outcome: 'cancelled' } }
+  if (answer.custom !== undefined && answer.custom.length > 0) return { outcome: { outcome: 'cancelled' } }
+  if (isCursorPlanApproval(rawRequest, answer)) return { outcome: { outcome: 'accepted' } }
+  if (answer.answers.length === 1 && answer.answers[0] === CURSOR_PLAN_KEEP_PLANNING_LABEL) return { outcome: { outcome: 'rejected' } }
+  return { outcome: { outcome: 'cancelled' } }
+}
+
+function formatCreatePlan(params: unknown): string {
+  if (!isRecord(params)) return ''
+  const parts = [stringValue(params.name), stringValue(params.overview), stringValue(params.plan)].filter((part): part is string => part !== undefined && part.length > 0)
+  const todos = Array.isArray(params.todos) ? params.todos : []
+  for (const todo of todos) {
+    if (!isRecord(todo)) continue
+    const content = stringValue(todo.content)
+    if (content !== undefined && content.length > 0) parts.push('- ' + content)
+  }
+  return parts.join(String.fromCharCode(10))
+}
+
+async function handleAskQuestion(host: ExternalAgentTurnHost, params: unknown, id: string, bounds: ExternalAgentEventBounds | undefined): Promise<unknown> {
+  if (!isRecord(params) || !Array.isArray(params.questions) || params.questions.length === 0) return { outcome: { outcome: 'cancelled' } }
+  const answers: { questionId: string; selectedOptionIds: string[] }[] = []
+  for (const raw of params.questions) {
+    if (!isRecord(raw)) continue
+    const questionId = stringValue(raw.id)
+    const prompt = stringValue(raw.prompt) ?? 'Choose an option.'
+    const choices = Array.isArray(raw.options) ? raw.options.flatMap(option => {
+      if (!isRecord(option)) return []
+      const optionIdValue = stringValue(option.id)
+      const label = stringValue(option.label) ?? optionIdValue
+      return optionIdValue === undefined || label === undefined ? [] : [{ id: optionIdValue, label }]
+    }) : []
+    if (questionId === undefined || choices.length === 0) continue
+    const rawRequest: ExternalAgentUserInputRequest = {
+      requestId: optionId(id + ':' + questionId),
+      question: prompt,
+      options: choices.map(choice => choice.label),
+      ...(raw.allowMultiple === true ? { multiple: true } : { multiple: false }),
+    }
+    const answer = await askUserOrCancel(host, rawRequest, bounds)
+    if (answer === undefined) return { outcome: { outcome: 'cancelled' } }
+    if (answer.custom !== undefined && answer.custom.length > 0) return { outcome: { outcome: 'cancelled' } }
+    if (answer.answers.length === 0) return { outcome: { outcome: 'cancelled' } }
+    const selectedOptionIds = answer.answers.flatMap(selected => {
+      const matches = choices.filter(choice => choice.label === selected || choice.id === selected)
+      const only = matches.length === 1 ? matches[0] : undefined
+      return only === undefined ? [] : [only.id]
+    })
+    if (selectedOptionIds.length === 0) return { outcome: { outcome: 'cancelled' } }
+    answers.push({ questionId, selectedOptionIds })
+  }
+  if (answers.length === 0) return { outcome: { outcome: 'cancelled' } }
+  return { outcome: { outcome: 'answered', answers } }
 }
 
 async function handlePermission(host: ExternalAgentTurnHost, params: unknown, id: string): Promise<unknown> {
