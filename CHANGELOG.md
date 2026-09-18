@@ -1,3 +1,8 @@
+## v0.1.19
+
+- Bound native activity persistence and reads for concurrent Cursor ACP sessions.
+- Coalesce transient text/tool updates and flush durable activity at turn and lifecycle boundaries.
+
 ## v0.1.18
 
 Register catalogId/binding/unknown against providers-ui 0.2.9.
