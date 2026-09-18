@@ -26,6 +26,9 @@ export const ACTIVITY_COALESCE_WINDOW_MS = 400
 export const ACTIVITY_MAX_PENDING_RECORDS = 64
 /** Hard ceiling on one text record; a longer delta starts a new pending record. */
 export const ACTIVITY_MAX_TEXT_CHARS = 8192
+/** Non-growing updates a pending tool row absorbs before it is written anyway, so
+ * a progress line that only redraws in place still advances for the reader. */
+export const ACTIVITY_TOOL_SKIP_FLUSH = 32
 
 /** Durable write seam: one call per batch, throwing fail-closed like today. */
 export interface ActivityCoalescerSink {
@@ -44,6 +47,8 @@ interface ToolPending {
   data: CursorAgentToolUpdateData
   /** Output length of the first update this record absorbed. */
   readonly base: number
+  /** Non-growing updates folded into this record since it last carried progress. */
+  skipped: number
 }
 
 type Pending = TextPending | ToolPending
@@ -60,20 +65,39 @@ function isCoalescible(event: CursorAgentActivityEvent): boolean {
   return event.type === CURSOR_AGENT_TEXT || event.type === CURSOR_AGENT_TOOL_UPDATE
 }
 
+/**
+ * Whether buffered text has reached a paragraph or closed-code-block boundary.
+ *
+ * The window is a ceiling, not a delay: text that already forms a visible block
+ * is written now, so streaming still shows the first paragraph promptly. Only a
+ * fence that is still open defers, because its remainder is still being typed.
+ */
+function atTextBoundary(text: string): boolean {
+  if (/\n[ \t]*\n/.test(text)) return true
+  if (!text.startsWith('```')) return false
+  const fence = text.indexOf('\n')
+  if (fence === -1) return false
+  const closer = text.indexOf('\n```', fence)
+  return closer !== -1 && /(?:^|\n)[ \t]*$/.test(text.slice(closer + 1))
+}
+
 /** Stable merge key: trajectory, parent and kind must match, undefined included. */
 function textKey(data: CursorAgentAgentTextData): string {
   return data.trajectoryId + '\u0000' + (data.parentTrajectoryId ?? '') + '\u0000' + data.kind
 }
 
 /**
- * Whether one tool update can be merged into the buffered record for its row.
+ * Whether one tool update can be folded into the buffered record for its row as
+ * unbounded, order-preserving growth.
  *
- * The only mergeable change is output that grows the string already buffered:
- * terminal output is cumulative, so the merged record folds to the same state
- * as the updates it replaces while keeping the first update's fields. A status,
- * name, ownership or location change, and a redraw that is not a growth of the
- * previous value, materialize a record instead — a stopped-then-refreshed
- * progress line is never hidden behind the window.
+ * The mergeable change is output that extends the string already buffered:
+ * terminal output is cumulative, so the merged record folds to the same state as
+ * the updates it replaces while keeping the first update's fields. A status,
+ * name, ownership or location change materializes a record instead, so a
+ * lifecycle transition is never hidden behind the window. A redraw that does not
+ * extend the buffered value is handled by the skip-count policy in
+ * {@link CursorAgentActivityCoalescer} rather than merged here, because folding
+ * it would replace the visible value instead of appending to it.
  */
 function toolMergeable(pending: ToolPending, next: CursorAgentToolUpdateData): boolean {
   const previous = pending.data
@@ -93,6 +117,7 @@ function mergeToolUpdate(pending: ToolPending, next: CursorAgentToolUpdateData):
     kind: 'tool',
     toolId: pending.toolId,
     base: pending.base,
+    skipped: 0,
     data: {
       toolId: next.toolId,
       ...(next.name === undefined && previous.name === undefined ? {} : { name: next.name ?? previous.name }),
@@ -104,6 +129,11 @@ function mergeToolUpdate(pending: ToolPending, next: CursorAgentToolUpdateData):
       ...(next.error === undefined && previous.error === undefined ? {} : { error: next.error ?? previous.error }),
     },
   }
+}
+
+/** Output already visible in a pending row; the fold a redraw must extend to count as progress. */
+function tailOutput(pending: ToolPending): string {
+  return pending.data.output ?? ''
 }
 
 /** Materialize one pending record back into its durable event. */
@@ -153,9 +183,13 @@ export class CursorAgentActivityCoalescer {
       }
       buffer ??= this.open(sessionId)
       if (buffer.queue.length >= ACTIVITY_MAX_PENDING_RECORDS) this.flush(sessionId)
-      if (event.type === CURSOR_AGENT_TEXT) this.bufferText(buffer, event.data)
-      else this.bufferToolUpdate(buffer, event.data as CursorAgentToolUpdateData)
-      this.schedule(sessionId, buffer)
+      const bounded = event.type === CURSOR_AGENT_TEXT
+        ? this.bufferText(buffer, event.data)
+        : this.bufferToolUpdate(buffer, event.data as CursorAgentToolUpdateData)
+      // A boundary or skip-count flush writes the record just buffered, so the
+      // appended content is already durable and still in emitted order.
+      if (bounded) this.flush(sessionId)
+      else this.schedule(sessionId, buffer)
     }
   }
 
@@ -230,7 +264,12 @@ export class CursorAgentActivityCoalescer {
     return buffer
   }
 
-  private bufferText(buffer: SessionBuffer, data: CursorAgentAgentTextData): void {
+  /** Merge one delta into the pending tail.
+   * @param buffer - Session buffer that owns the queue tail.
+   * @param data - Decoded native text delta.
+   * @returns Whether the merged text reached a paragraph or closed code block.
+   */
+  private bufferText(buffer: SessionBuffer, data: CursorAgentAgentTextData): boolean {
     const key = textKey(data)
     // Only the queue tail may merge: a record emitted between two deltas must
     // stay between them, or the fold would concatenate across it.
@@ -238,21 +277,39 @@ export class CursorAgentActivityCoalescer {
     const pending = last?.kind === 'text' && last.key === key ? last : undefined
     if (pending !== undefined && pending.data.text.length + data.text.length <= ACTIVITY_MAX_TEXT_CHARS) {
       pending.data.text += data.text
-      return
+      return atTextBoundary(pending.data.text)
     }
     buffer.queue.push({ kind: 'text', key, data: { ...data } })
+    return atTextBoundary(data.text)
   }
 
-  private bufferToolUpdate(buffer: SessionBuffer, data: CursorAgentToolUpdateData): void {
+  /** Merge one tool update into the pending tail.
+   * @param buffer - Session buffer that owns the queue tail.
+   * @param data - Decoded native tool update.
+   * @returns Whether the row hit its skip-count flush and must be written now.
+   */
+  private bufferToolUpdate(buffer: SessionBuffer, data: CursorAgentToolUpdateData): boolean {
     // Same tail rule: a tool update may only fold into the row's own latest
     // record while nothing else was emitted after it.
     const last = buffer.queue.at(-1)
     const pending = last?.kind === 'tool' && last.toolId === data.toolId ? last : undefined
     if (pending !== undefined && toolMergeable(pending, data)) {
       buffer.queue[buffer.queue.length - 1] = mergeToolUpdate(pending, data)
-      return
+      return false
     }
-    buffer.queue.push({ kind: 'tool', toolId: data.toolId, data: { ...data }, base: data.output?.length ?? 0 })
+    if (pending !== undefined
+      && data.status === pending.data.status
+      && (data.output ?? '').length <= pending.base
+      && (data.output ?? '').startsWith(tailOutput(pending))) {
+      // A redraw that does not grow the row: keep the newest value in the same
+      // record instead of writing one record per repaint. A real growth (a new
+      // value on top of the first one) still materializes a record of its own.
+      pending.data = data
+      pending.skipped += 1
+      return pending.skipped >= ACTIVITY_TOOL_SKIP_FLUSH
+    }
+    buffer.queue.push({ kind: 'tool', toolId: data.toolId, data: { ...data }, base: data.output?.length ?? 0, skipped: 0 })
+    return false
   }
 
   private schedule(sessionId: string, buffer: SessionBuffer): void {

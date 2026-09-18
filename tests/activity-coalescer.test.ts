@@ -3,6 +3,7 @@ import {
   ACTIVITY_COALESCE_WINDOW_MS,
   ACTIVITY_MAX_PENDING_RECORDS,
   ACTIVITY_MAX_TEXT_CHARS,
+  ACTIVITY_TOOL_SKIP_FLUSH,
   CursorAgentActivityCoalescer,
   type ActivityCoalescerSink,
 } from '../src/activity-coalescer.js'
@@ -96,6 +97,30 @@ describe('CursorAgent activity coalescer', () => {
     expect(batches).toHaveLength(2)
   })
 
+  it('flushes on a paragraph boundary without waiting for the window', () => {
+    const { sink, batches, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    coalescer.append(SESSION, [text('first paragraph\n\n')])
+    // The window never elapsed: the closed paragraph is a visible block already.
+    expect(batches).toHaveLength(1)
+    expect(flat().map(event => event.type === CURSOR_AGENT_TEXT ? event.data.text : '')).toEqual(['first paragraph\n\n'])
+    coalescer.append(SESSION, [text('still typing')])
+    expect(batches).toHaveLength(1)
+    coalescer.append(SESSION, [text(' the rest\n\n')])
+    expect(batches).toHaveLength(2)
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
+  })
+
+  it('defers an open code fence and flushes it once the fence closes', () => {
+    const { sink, batches, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    coalescer.append(SESSION, [text('```ts\nconst x = 1\n')])
+    expect(batches).toHaveLength(0)
+    coalescer.append(SESSION, [text('const y = 2\n```\n')])
+    expect(batches).toHaveLength(1)
+    expect(flat().map(event => event.type === CURSOR_AGENT_TEXT ? event.data.text : '')).toEqual(['```ts\nconst x = 1\nconst y = 2\n```\n'])
+  })
+
   it('splits text at the record ceiling without losing or reordering content', () => {
     const { sink, flat } = recorder()
     const coalescer = new CursorAgentActivityCoalescer(sink)
@@ -131,6 +156,16 @@ describe('CursorAgent activity coalescer', () => {
     // A constant-length redraw replaces the value instead of growing it, so it is
     // written rather than hidden behind the window.
     expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.output : '')).toEqual(['0000', '1111', '2222', '3333'])
+  })
+
+  it('collapses a repaint that repeats the same value and flushes at the skip count', () => {
+    const { sink, flat } = recorder()
+    const coalescer = new CursorAgentActivityCoalescer(sink)
+    for (let index = 0; index <= ACTIVITY_TOOL_SKIP_FLUSH; index++) coalescer.append(SESSION, [toolUpdate('t1', 'running', 'repaint')])
+    // Identical repaints fold into one row; the count forces one durable write.
+    expect(flat().map(event => event.type === CURSOR_AGENT_TOOL_UPDATE ? event.data.output : '')).toEqual(['repaint'])
+    coalescer.flush(SESSION)
+    expect(coalescer.pendingCount(SESSION)).toBe(0)
   })
 
   it('keeps per-tool updates separate and preserves terminal states', () => {

@@ -204,6 +204,19 @@ describe('CursorAgent activity coalescing through the bridge', () => {
     expect(updates.at(-1)?.data.output).toBe('grew more')
   })
 
+  it('keeps the visible fold identical across a paragraph-boundary flush', async () => {
+    const steps = [delta('para one\n\n'), delta('para '), delta('two\n\n'), delta('```\ncode\n```\n'), delta('tail')]
+    const rawRoot = tempRoot()
+    await harness(steps, passThroughHost(rawRoot)).drain()
+    const coalescedRoot = tempRoot()
+    await harness(steps, activityHost(createCursorAgentActivityWriter(coalescedRoot))).drain()
+    const texts = (records: readonly CursorAgentActivityRecord[]) => foldAgentTextRecords(records).map(row => row.text)
+    expect(texts(recordsOf(coalescedRoot))).toEqual(texts(recordsOf(rawRoot)))
+    // The boundary flush is durable before the turn settles, but the fold still
+    // joins consecutive same-key records, so visible rows are unchanged.
+    expect(texts(recordsOf(coalescedRoot))).toEqual(['para one\n\npara two\n\n```\ncode\n```\ntail'])
+  })
+
   it('flushes buffered activity on session disposal while the turn is open', async () => {
     const root = tempRoot()
     const writer = createCursorAgentActivityWriter(root)
