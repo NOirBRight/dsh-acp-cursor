@@ -6,11 +6,12 @@
  * child outcome, and no row is ever inferred from thought text. Reuses the
  * canonical fold, so display state cannot drift from durable state.
  *
- * The subscription retains one fold and one sequence cursor per connection and
- * session: it bootstraps once with a full validated read, then requests only
- * records after its cursor. Epoch, row routing, and text merging survive page
- * boundaries; a stale cursor or a backlog deeper than the page budget
- * resynchronizes with one full read instead of an unbounded number of pages.
+ * The subscription retains one fold and one Activity sequence cursor per
+ * connection and session: it pages from Activity sequence cursor 0, then
+ * requests only records after its cursor. Epoch, row routing, and text merging
+ * survive page boundaries. An Activity stale cursor resets to 0 and pages
+ * again. A backlog deeper than one poll's page budget continues on the next
+ * poll instead of transferring the whole history.
  */
 import {
   CURSOR_AGENT_SESSION_READY,
@@ -26,11 +27,9 @@ import {
 } from '../tool-events.js'
 import { ACP_SETTINGS_RPC_CHANNEL } from '../client-contract.js'
 import {
-  ACTIVITY_ENDPOINT,
   ACTIVITY_READ_AFTER_ENDPOINT,
   ACTIVITY_STALE_CURSOR,
   CURSOR_AGENT_FULL_ACCESS_AUTHORIZED,
-  decodeActivityHistory,
   decodeActivityPage,
   type CursorAgentActivityPage,
   type CursorAgentActivityRecord,
@@ -69,6 +68,7 @@ export interface CursorAgentAgentTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   readonly text: string
 }
 
@@ -80,10 +80,11 @@ export interface NativeActivityTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   text: string
 }
 
-/** Fold state retained across incremental pages and replaced only by a full bootstrap. */
+/** Fold state retained across incremental pages and replaced when paging from Activity sequence cursor 0. */
 export interface NativeActivityFoldState {
   readonly rows: NativeActivityRow[]
   readonly indexById: Map<string, number>
@@ -92,7 +93,7 @@ export interface NativeActivityFoldState {
   epoch: number
 }
 
-/** Empty fold state for a new bootstrap; epoch 0 until the first session-ready record.
+/** Empty fold state for a new retained fold; epoch 0 until the first session-ready record.
  * @returns Mutable fold state owned by one subscription.
  */
 export function createNativeActivityFoldState(): NativeActivityFoldState {
@@ -119,7 +120,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
     }
     if (record.type === CURSOR_AGENT_TEXT) {
       const last = state.texts.at(-1)
-      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
+      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.source === record.data.source && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
         last.text += record.data.text
         continue
       }
@@ -130,6 +131,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
         trajectoryId: record.data.trajectoryId,
         ...(record.data.parentTrajectoryId === undefined ? {} : { parentTrajectoryId: record.data.parentTrajectoryId }),
         kind: record.data.kind,
+        ...(record.data.source === undefined ? {} : { source: record.data.source }),
         text: record.data.text,
       })
       continue
@@ -206,14 +208,6 @@ export interface ActivityRpc {
   }>
 }
 
-/** Read the full validated history; the bootstrap and resynchronization read. */
-async function loadActivityRecords(rpc: ActivityRpc, sessionId: string, signal?: AbortSignal, metrics?: NativeActivityMetrics): Promise<readonly CursorAgentActivityRecord[]> {
-  if (metrics !== undefined) metrics.fullReadCalls += 1
-  const result = await rpc.call(ACP_SETTINGS_RPC_CHANNEL, ACTIVITY_ENDPOINT, { sessionId }, signal)
-  if (!result.ok) throw new Error(result.error?.message ?? 'CursorAgent activity history is unavailable')
-  return decodeActivityHistory(result.value).records
-}
-
 /** Read one bounded page strictly after the retained cursor. */
 async function loadActivityPage(rpc: ActivityRpc, sessionId: string, afterSeq: number, signal: AbortSignal, metrics?: NativeActivityMetrics): Promise<CursorAgentActivityPage> {
   const result = await rpc.call(ACP_SETTINGS_RPC_CHANNEL, ACTIVITY_READ_AFTER_ENDPOINT, { sessionId, afterSeq }, signal)
@@ -230,13 +224,13 @@ async function loadActivityPage(rpc: ActivityRpc, sessionId: string, afterSeq: n
   return page
 }
 
-/** Host history no longer contains the retained cursor: resynchronize instead of retrying it. */
+/** Host history no longer contains the retained Activity sequence cursor: page again from 0. */
 class StaleActivityCursorError extends Error {}
 
 /** Poll interval for the session-scoped native history subscription. */
 export const NATIVE_HISTORY_POLL_MS = 1000
 
-/** Page budget for one poll: a deeper backlog than this resynchronizes instead of chasing pages. */
+/** Page budget for one poll: a deeper backlog continues on the next poll. */
 export const NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES = 4
 
 /** Snapshot shared by every mounted turn container in one session. */
@@ -249,14 +243,12 @@ export interface NativeHistorySnapshot {
 
 /** Value-free browser-side counters for bounded reads and resynchronizations. */
 export interface NativeActivityMetricsSnapshot {
-  readonly fullReadCalls: number
   readonly pageCalls: number
   readonly pageRecords: number
   readonly resynchronizations: number
 }
 
 interface NativeActivityMetrics {
-  fullReadCalls: number
   pageCalls: number
   pageRecords: number
   resynchronizations: number
@@ -273,9 +265,10 @@ interface NativeHistoryEntry {
   state: NativeActivityFoldState
   snapshot: NativeHistorySnapshot
   metrics: NativeActivityMetrics
-  /** Exclusive cursor of the retained state: 0 until a bootstrap completes. */
+  /** Exclusive Activity sequence cursor of the retained fold: 0 until the first page lands. */
   cursor: number
-  bootstrapped: boolean
+  /** True after an accepted page establishes the fold, even if a later page is cancelled. */
+  retained: boolean
   listeners: Set<() => void>
   timer: ReturnType<typeof setTimeout> | undefined
   controller: AbortController | undefined
@@ -283,7 +276,7 @@ interface NativeHistoryEntry {
 
 /** One entry per live connection and session: keying by the RPC face keeps
  * concurrent connections from sharing or resurrecting each other's history,
- * so a reconnecting connection bootstraps from its own full read.
+ * so a reconnecting connection pages from Activity sequence cursor 0 on its own RPC face.
  * Unsubscribed entries retain history but no timer or active request.
  * ponytail: histories live for the RPC lifetime; add inactive-session LRU eviction
  * if browsing many large sessions makes retained memory significant.
@@ -301,9 +294,9 @@ function entryFor(rpc: ActivityRpc, sessionId: string): NativeHistoryEntry {
     entry = {
       state: createNativeActivityFoldState(),
       snapshot: EMPTY_NATIVE_HISTORY,
-      metrics: { fullReadCalls: 0, pageCalls: 0, pageRecords: 0, resynchronizations: 0 },
+      metrics: { pageCalls: 0, pageRecords: 0, resynchronizations: 0 },
       cursor: 0,
-      bootstrapped: false,
+      retained: false,
       listeners: new Set(),
       timer: undefined,
       controller: undefined,
@@ -326,38 +319,36 @@ function notifyEntry(entry: NativeHistoryEntry): void {
   for (const listener of [...entry.listeners]) listener()
 }
 
-/** Replace retained state with a full validated read; assigned only after the read resolves and
- * only while this poll is still the active one, so a failed or superseded bootstrap never leaves
- * a partial snapshot or resurrects a torn-down fold.
- * @returns True when the retained state was replaced.
- */
-async function bootstrapNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc: ActivityRpc, controller: AbortController): Promise<boolean> {
-  const records = await loadActivityRecords(rpc, sessionId, controller.signal, entry.metrics)
-  if (entry.controller !== controller) return false
-  entry.state = applyActivityRecords(createNativeActivityFoldState(), records)
-  entry.cursor = records.at(-1)?.seq ?? 0
-  entry.bootstrapped = true
-  return true
+function resetRetainedFold(entry: NativeHistoryEntry): void {
+  entry.state = createNativeActivityFoldState()
+  entry.cursor = 0
 }
 
-/** Apply bounded pages after the retained cursor.
- * @returns True when at least one record or a resynchronization changed the state.
+/** Apply bounded pages after the retained Activity sequence cursor.
+ * Each non-empty page publishes the fold immediately so a long history cannot
+ * hold the transcript on one unbounded transfer. A poll that still has more
+ * stops here: the next poll continues from the cursor instead of rereading.
+ * @returns True when at least one record changed the state.
  */
 async function followNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc: ActivityRpc, controller: AbortController): Promise<boolean> {
   let changed = false
   for (let page = 0; page < NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES; page++) {
     const next = await loadActivityPage(rpc, sessionId, entry.cursor, controller.signal, entry.metrics)
     if (entry.controller !== controller) return changed
-    changed = changed || next.records.length > 0
+    // A later page can be cancelled: each accepted page establishes the fold.
+    entry.retained = true
+    if (next.records.length === 0) {
+      entry.cursor = next.nextCursor
+      return changed
+    }
+    changed = true
     applyActivityRecords(entry.state, next.records)
     entry.cursor = next.nextCursor
-    // A later page can be cancelled on navigation: keep the snapshot aligned
-    // with every committed cursor, not only with a fully completed poll.
-    if (next.records.length > 0) entry.snapshot = snapshotOf(entry.state)
+    entry.snapshot = snapshotOf(entry.state)
+    notifyEntry(entry)
     if (!next.hasMore) return changed
   }
-  entry.metrics.resynchronizations += 1
-  return (await bootstrapNativeHistory(sessionId, entry, rpc, controller)) || changed
+  return changed
 }
 
 async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc: ActivityRpc): Promise<void> {
@@ -368,16 +359,20 @@ async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, r
   let error: string | undefined
   try {
     try {
-      if (!entry.bootstrapped) {
-        changed = await bootstrapNativeHistory(sessionId, entry, rpc, controller)
-      } else {
-        changed = await followNativeHistory(sessionId, entry, rpc, controller)
-      }
+      if (!entry.retained) resetRetainedFold(entry)
+      changed = await followNativeHistory(sessionId, entry, rpc, controller)
     } catch (caught) {
       if (!(caught instanceof StaleActivityCursorError)) throw caught
-      // The host history no longer contains this cursor: resynchronize once from a full read.
+      // The host history no longer contains this Activity sequence cursor: page again from 0.
       entry.metrics.resynchronizations += 1
-      changed = await bootstrapNativeHistory(sessionId, entry, rpc, controller)
+      if (entry.controller !== controller) return
+      resetRetainedFold(entry)
+      entry.retained = false
+      // Publish the empty fold immediately so a deleted history cannot keep previous rows.
+      entry.snapshot = snapshotOf(entry.state)
+      notifyEntry(entry)
+      changed = true
+      changed = (await followNativeHistory(sessionId, entry, rpc, controller)) || changed
     }
   } catch (caught) {
     if (entry.controller !== controller) return
@@ -404,10 +399,10 @@ function scheduleNativeHistory(sessionId: string, entry: NativeHistoryEntry, rpc
 /** Session-scoped abortable subscription over native history: one poll loop
  * per connection and session no matter how many turn containers mount, so
  * trailing records after a turn ends still arrive while any native view stays
- * mounted. The first poll bootstraps from the full history; later polls apply
- * only records after the retained cursor. Late tool updates never move rows
- * (partition keys on firstSeenAt). Refresh and resubscribe cancel the active
- * read and start a new one, so a superseded promise can never stall the loop.
+ * mounted. The first poll pages from Activity sequence cursor 0; later polls apply only records
+ * after the retained cursor. Late tool updates never move rows (partition keys
+ * on firstSeenAt). Refresh and resubscribe cancel the active read and start a
+ * new one, so a superseded promise can never stall the loop.
  * No new framework dependency: plain subscribe/getSnapshot for useSyncExternalStore.
  * @param rpc - Logical-channel RPC face scoping the store lifetime.
  * @param sessionId - DSH session scoping the sidecar read.
@@ -431,8 +426,8 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
           if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
           entry.controller?.abort()
           entry.controller = undefined
-          // Keep the fold and cursor together: remounts display history immediately
-          // and fetch only activity received while this session was offscreen.
+          // Keep the fold and Activity sequence cursor together so navigation
+          // displays cached history immediately and resumes only missing pages.
         }
       }
     },
@@ -442,8 +437,8 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
       entry.controller?.abort()
       entry.controller = undefined
       if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
-      // The next poll bootstraps from the full history and swaps it in atomically.
-      entry.bootstrapped = false
+      // The next poll pages from Activity sequence cursor 0 and swaps the fold in as pages arrive.
+      entry.retained = false
       if (entry.listeners.size > 0) void pollNativeHistory(sessionId, entry, rpc)
     },
   }

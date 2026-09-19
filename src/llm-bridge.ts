@@ -10,6 +10,7 @@ import {
   type ExternalAgentPermissionRequest,
   type ExternalAgentPermissionMode,
   type ExternalAgentProvider,
+  type ExternalAgentAttachment,
   type ExternalAgentSessionRef,
   type ExternalAgentTurnRequest,
   type ExternalAgentTurnResult,
@@ -109,6 +110,11 @@ export interface BridgeHost {
    * from prompt assembly.
    */
   resolveSelectedModel?(sessionId: string | undefined): { model: string; reasoningEffort?: string } | undefined
+  /**
+   * Resolve one durable DSH image reference to bytes. Required when the last
+   * user message contains `{ type: 'image', attachment }`.
+   */
+  readImage?(attachment: unknown, signal?: AbortSignal): Promise<{ data: Uint8Array; mimeType: string; name?: string }>
 }
 
 /** Closed outcome of one canonical approval ask. Structural mirror of the approval-service vocabulary. */
@@ -123,15 +129,18 @@ export interface CursorAgentSandboxPolicy {
   readonly workspaceRoot: string
 }
 
-export function lastUserText(messages: readonly unknown[]): string {
+function lastUserMessage(messages: readonly unknown[]): unknown {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
     if (!isRecord(message)) continue
-    if (!(isRecord(message.source) && message.source.kind === 'user')) continue
-    const text = textOf(message.content)
-    if (text.length > 0) return text
+    if (isRecord(message.source) && message.source.kind === 'user') return message
   }
-  return ''
+  return undefined
+}
+
+export function lastUserText(messages: readonly unknown[]): string {
+  const message = lastUserMessage(messages)
+  return isRecord(message) ? textOf(message.content) : ''
 }
 
 export function lastSkillText(messages: readonly unknown[]): string {
@@ -151,6 +160,37 @@ export function acpPrompt(messages: readonly unknown[]): string {
   if (skill.length === 0) return user
   if (user.length === 0) return skill
   return skill + String.fromCharCode(10) + String.fromCharCode(10) + user
+}
+
+export async function acpAttachments(
+  messages: readonly unknown[],
+  readImage: BridgeHost['readImage'] | undefined,
+  signal?: AbortSignal,
+): Promise<readonly ExternalAgentAttachment[]> {
+  const message = lastUserMessage(messages)
+  const content = isRecord(message) ? message.content : undefined
+  if (!Array.isArray(content)) return []
+  const attachments: ExternalAgentAttachment[] = []
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== 'image') continue
+    if (typeof block.data === 'string' && typeof block.mimeType === 'string') {
+      attachments.push({
+        name: typeof block.name === 'string' ? block.name : 'image',
+        mimeType: block.mimeType,
+        data: block.data,
+      })
+      continue
+    }
+    if (!isRecord(block.attachment)) throw new Error('CursorAgent image block has no attachment or data')
+    if (readImage === undefined) throw new Error('CursorAgent image input requires the durable attachment service')
+    const stored = await readImage(block.attachment, signal)
+    attachments.push({
+      name: stored.name ?? (typeof block.attachment.name === 'string' ? block.attachment.name : 'image'),
+      mimeType: stored.mimeType,
+      data: Buffer.from(stored.data).toString('base64'),
+    })
+  }
+  return attachments
 }
 
 function formatPlanUpdate(event: { summary: string; steps: readonly string[] }): string {
@@ -368,7 +408,7 @@ export function createCursorAgentLlmBridge(
               } }])
               return
             }
-            hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind, text } }])
+            hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind, source: 'assistant', text } }])
           }
           else if (event.type === 'tool-activity') {
             const seen = emittedToolIds.get(key) ?? new Set<string>()
@@ -379,7 +419,7 @@ export function createCursorAgentLlmBridge(
           }
           else if (event.type === 'plan-update') {
             const text = formatPlanUpdate(event)
-            if (text.length > 0) hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind: 'text', text } }])
+            if (text.length > 0) hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind: 'text', source: 'plan', text } }])
           }
           // Stock Agent chrome: drop ACP usage. Do not yield TokenUsage.
         },
@@ -433,12 +473,13 @@ export function createCursorAgentLlmBridge(
         return { thought, text, thoughtOpen, textOpen }
       }
       let active: Promise<ExternalAgentTurnResult> | undefined
-      const run = (text: string): Promise<ExternalAgentTurnResult> => {
+      const run = (text: string, promptAttachments: readonly ExternalAgentAttachment[] = []): Promise<ExternalAgentTurnResult> => {
         const turn: ExternalAgentTurnRequest = {
           turn: turnId('t' + String(++turns)),
           prompt: text,
           permissionMode,
           signal,
+          ...(promptAttachments.length > 0 ? { attachments: promptAttachments } : {}),
         }
         const nativeTurn = nativeMode === undefined ? turn : Object.assign({}, turn, { nativeMode })
         active = runner.runTurn(nativeTurnOpen(), nativeTurn, turnHost)
@@ -457,7 +498,12 @@ export function createCursorAgentLlmBridge(
         }
       }
       try {
-        const first = run(prompt)
+        const attachments = await acpAttachments(options.messages, hostAsk?.readImage, signal)
+        if (prompt.trim().length === 0 && attachments.length === 0) {
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        const first = run(prompt, attachments)
         let state = yield* drain(first, { thought: '', text: '', thoughtOpen: false, textOpen: false })
         const result = await first
         let finalStatus = result.status
@@ -465,7 +511,7 @@ export function createCursorAgentLlmBridge(
         let assembled = state.text.length > 0 ? state.text : result.text
         // Replay the original prompt once when the native turn already failed as a transport dump.
         if (!signal.aborted && dumpFailedNativeTurn(result)) {
-          const replay = run(prompt)
+          const replay = run(prompt, attachments)
           state = yield* drain(replay, { thought: '', text: '', thoughtOpen: false, textOpen: false })
           const next = await replay
           finalStatus = next.status

@@ -227,6 +227,7 @@ function isAgentTextData(value: unknown): value is CursorAgentAgentTextData {
   if (!isRecord(value) || stringValue(value.trajectoryId) === undefined) return false
   if (value.parentTrajectoryId !== undefined && stringValue(value.parentTrajectoryId) === undefined) return false
   if (value.kind !== 'text' && value.kind !== 'thought') return false
+  if (value.source !== undefined && value.source !== 'assistant' && value.source !== 'plan') return false
   return typeof value.text === 'string' && value.text.length > 0
 }
 

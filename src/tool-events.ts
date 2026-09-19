@@ -126,6 +126,8 @@ export interface CursorAgentAgentTextData {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  /** Absent on older records; plans must not be mistaken for answer previews. */
+  readonly source?: 'assistant' | 'plan'
   readonly text: string
 }
 

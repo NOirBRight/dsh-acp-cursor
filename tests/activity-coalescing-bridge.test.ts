@@ -7,6 +7,7 @@ import { ExternalAgentProviderRegistry, modelId, providerId, sessionId, toolId, 
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createCursorAgentActivityWriter } from '../src/dsh-plugin.js'
 import { createCursorAgentLlmBridge, type BridgeHost } from '../src/llm-bridge.js'
+import { visibleNativeTexts } from '../src/web/native-turn.js'
 import { ACTIVITY_COALESCE_WINDOW_MS } from '../src/activity-coalescer.js'
 import { decodeActivityRecord, type CursorAgentActivityRecord } from '../src/activity-contract.js'
 import type { CursorAgentActivityEvent } from '../src/activity-store.js'
@@ -21,6 +22,7 @@ const SESSION = 'session-coalesced'
 type Step =
   | { readonly publish: CursorAgentActivityEvent }
   | { readonly wait: Promise<void> }
+  | { readonly plan: string }
 
 type ActivityWriter = ReturnType<typeof createCursorAgentActivityWriter>
 
@@ -85,6 +87,7 @@ function harness(steps: readonly Step[], host: BridgeHost, onNativeDispose?: () 
       dispose: async () => { onNativeDispose?.() },
       runTurn: async (_request, turnHost) => {
         for (const step of steps) {
+          if ('plan' in step) { await turnHost.publish({ type: 'plan-update', summary: step.plan, steps: [] }); continue }
           if (!('publish' in step)) { await Promise.race([step.wait, aborted(abort.signal)]); continue }
           if (abort.signal.aborted) break
           await turnHost.publish(toWireEvent(step.publish))
@@ -158,6 +161,20 @@ function toolProgress(toolId: string, output: string, status: 'running' | 'compl
 }
 
 describe('CursorAgent activity coalescing through the bridge', () => {
+  it('preserves plan provenance through durable coalescing, decoding and rendering', async () => {
+    const root = tempRoot()
+    const writer = createCursorAgentActivityWriter(root)
+    await harness([delta('before'), { plan: 'Independent plan' }, delta('after')], activityHost(writer)).drain()
+    const records = recordsOf(root)
+    const texts = foldAgentTextRecords(records)
+    expect(texts.map(row => [row.source, row.text])).toEqual([
+      ['assistant', 'before'], ['plan', 'Independent plan\n'], ['assistant', 'after'],
+    ])
+    expect(visibleNativeTexts(texts, ['beforeafter']).map(row => row.text)).toEqual(['Independent plan\n'])
+    const record = records.find(row => row.type === CURSOR_AGENT_TEXT)!
+    expect(() => decodeActivityRecord(JSON.stringify({ ...record, v: 1, data: { ...record.data, source: 'unknown' } }), record.seq)).toThrow()
+  })
+
   it('delivers every delta exactly once, flushed before the finish chunk', async () => {
     const root = tempRoot()
     const writer = createCursorAgentActivityWriter(root)

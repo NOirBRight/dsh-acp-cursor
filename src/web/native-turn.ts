@@ -11,7 +11,7 @@ import type {
   ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
-import type { CursorAgentToolRowData } from './native-activity.js'
+import type { CursorAgentAgentTextRow, CursorAgentToolRowData } from './native-activity.js'
 
 /** One turn's native activity window: turn/end wall clock while the turn is open. */
 export interface CursorAgentNativeTurn {
@@ -174,4 +174,23 @@ function anchorOf(context: ConversationNodeContext<CursorAgentNativeTurn>): numb
   const chosen = chunk ?? step ?? seq
   const base = typeof chosen === 'number' && Number.isFinite(chosen) ? chosen : 0
   return after > base ? after + 0.001 : base
+}
+
+/** Keep independent activity while the assistant-step renders its own answer.
+ * Older records have no source: only remove an exact duplicate or answer suffix.
+ * Uncertain legacy content stays visible rather than losing a plan or progress.
+ */
+export function visibleNativeTexts(rows: readonly CursorAgentAgentTextRow[], answers: readonly string[]): readonly CursorAgentAgentTextRow[] {
+  const nonempty = answers.filter(answer => answer.length > 0).reverse()
+  if (nonempty.length === 0) return rows
+  return rows.flatMap(row => {
+    if (row.kind === 'thought' || row.parentTrajectoryId !== undefined || row.source === 'plan') return [row]
+    if (row.source === 'assistant') return []
+    let text = row.text
+    for (const answer of nonempty) {
+      if (answer.includes(text)) return []
+      if (text.endsWith(answer)) text = text.slice(0, -answer.length)
+    }
+    return text === row.text ? [row] : [{ ...row, text }]
+  })
 }
