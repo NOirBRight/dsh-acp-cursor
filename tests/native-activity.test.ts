@@ -202,19 +202,30 @@ describe('native history subscription', () => {
     expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
   })
 
-  it('resets the cursor on unsubscribe so a remount bootstraps again', async () => {
-    const { rpc, calls } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT ? history([ready(1), start(2, 't1', owned)]) : page([], 2, false))
+  it('retains displayed history across session switches and resumes after its cursor', async () => {
+    const { rpc, calls } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT
+      ? history([ready(1), start(2, 't1', owned), text(3, 'thinking')])
+      : page([update(4, 't1', 'completed'), text(5, ' more')], 5, false))
     const store = getNativeHistoryStore(rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)
     await settle()
+    const displayed = store.getSnapshot()
     unsubscribe()
-    expect(store.getSnapshot().rows).toEqual([])
+    await pollAgain()
+    expect(calls).toHaveLength(1)
 
-    store.subscribe(() => undefined)
+    const remounted = getNativeHistoryStore(rpc, SESSION)
+    expect(remounted.getSnapshot()).toBe(displayed)
+    const stop = remounted.subscribe(() => undefined)
+    expect(remounted.getSnapshot()).toBe(displayed)
     await settle()
-    expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
-    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(0)
+    expect(remounted.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
+    expect(remounted.getSnapshot().texts.map(row => row.text)).toEqual(['thinking more'])
+    expect(calls.map(call => [call.endpoint, call.payload])).toEqual([
+      [ACTIVITY_ENDPOINT, { sessionId: SESSION }],
+      [ACTIVITY_READ_AFTER_ENDPOINT, { sessionId: SESSION, afterSeq: 3 }],
+    ])
+    stop()
   })
 
   it('drops a bootstrap superseded by unsubscribe so a remount starts clean', async () => {
@@ -241,6 +252,53 @@ describe('native history subscription', () => {
     await settle()
     expect(calls).toEqual([ACTIVITY_ENDPOINT, ACTIVITY_ENDPOINT])
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
+  })
+
+  it('keeps completed pages visible when switching away during a later page', async () => {
+    let release: ((reply: Reply) => void) | undefined
+    const held = new Promise<Reply>(resolve => { release = resolve })
+    let pageCalls = 0
+    let pendingSignal: AbortSignal | undefined
+    const rpc: ActivityRpc = {
+      call: async (_channel, endpoint, _payload, signal) => {
+        if (endpoint === ACTIVITY_ENDPOINT) return history([ready(1)])
+        pageCalls += 1
+        if (pageCalls === 1) return page([start(2, 't1', owned)], 2, true)
+        if (pageCalls === 2) { pendingSignal = signal; return held }
+        return page([], 2, false)
+      },
+    }
+    const store = getNativeHistoryStore(rpc, SESSION)
+    const stop = store.subscribe(() => undefined)
+    await settle()
+    await pollAgain()
+    expect(pageCalls).toBe(2)
+    stop()
+    expect(pendingSignal?.aborted).toBe(true)
+    const stopAgain = store.subscribe(() => undefined)
+    await settle()
+    expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
+    release?.(page([update(3, 't1', 'completed')], 3, false))
+    await settle()
+    expect(store.getSnapshot().rows.map(row => row.state.status)).toEqual(['pending'])
+    stopAgain()
+  })
+
+  it('shares one poll across views and isolates another session', async () => {
+    const { rpc, calls } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT
+      ? history([ready(1), start(2, 't1', owned)]) : page([], 2, false))
+    const store = getNativeHistoryStore(rpc, SESSION)
+    const stopFirst = store.subscribe(() => undefined)
+    const stopSecond = getNativeHistoryStore(rpc, SESSION).subscribe(() => undefined)
+    await settle()
+    expect(calls).toHaveLength(1)
+    expect(getNativeHistoryStore(rpc, 'other-session').getSnapshot().rows).toEqual([])
+    stopFirst()
+    await pollAgain()
+    expect(calls).toHaveLength(2)
+    stopSecond()
+    await pollAgain()
+    expect(calls).toHaveLength(2)
   })
 
   it('gives a reconnecting connection its own bootstrap', async () => {

@@ -266,7 +266,7 @@ function copyNativeActivityMetrics(metrics: NativeActivityMetrics): NativeActivi
   return { ...metrics }
 }
 
-/** Shared empty snapshot: subscription teardown leaves no per-session history retained. */
+/** Shared empty snapshot until the first successful history read. */
 const EMPTY_NATIVE_HISTORY: NativeHistorySnapshot = { rows: [], agents: [], texts: [] }
 
 interface NativeHistoryEntry {
@@ -284,8 +284,9 @@ interface NativeHistoryEntry {
 /** One entry per live connection and session: keying by the RPC face keeps
  * concurrent connections from sharing or resurrecting each other's history,
  * so a reconnecting connection bootstraps from its own full read.
- * Entries are lightweight once unsubscribed (empty snapshot, no cursor, no
- * timer), so React StrictMode remounts reuse them without holding histories.
+ * Unsubscribed entries retain history but no timer or active request.
+ * ponytail: histories live for the RPC lifetime; add inactive-session LRU eviction
+ * if browsing many large sessions makes retained memory significant.
  */
 const nativeHistoryStores = new WeakMap<ActivityRpc, Map<string, NativeHistoryEntry>>()
 
@@ -350,6 +351,9 @@ async function followNativeHistory(sessionId: string, entry: NativeHistoryEntry,
     changed = changed || next.records.length > 0
     applyActivityRecords(entry.state, next.records)
     entry.cursor = next.nextCursor
+    // A later page can be cancelled on navigation: keep the snapshot aligned
+    // with every committed cursor, not only with a fully completed poll.
+    if (next.records.length > 0) entry.snapshot = snapshotOf(entry.state)
     if (!next.hasMore) return changed
   }
   entry.metrics.resynchronizations += 1
@@ -427,11 +431,8 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
           if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
           entry.controller?.abort()
           entry.controller = undefined
-          // Reset the cursor with the snapshot, so a remount bootstraps instead of reading after dropped state.
-          entry.state = createNativeActivityFoldState()
-          entry.cursor = 0
-          entry.bootstrapped = false
-          entry.snapshot = EMPTY_NATIVE_HISTORY
+          // Keep the fold and cursor together: remounts display history immediately
+          // and fetch only activity received while this session was offscreen.
         }
       }
     },
