@@ -1,4 +1,4 @@
-## Unreleased
+## v0.1.21
 
 - Strip a trailing HTTP/2 `CANCEL` / `RetriableError` dump after a real answer so the leak is not stored as the reply.
 - Forward user image attachments into Cursor ACP `session/prompt` as `image` blocks. Path images are read as bytes instead of `resource_link`, so vision models actually see the picture.
