@@ -37,17 +37,20 @@ try {
     })
     async function openSession(title) {
       const item = page.getByText(title, { exact: true }).first()
-      if (!await item.isVisible()) {
-        const toggle = page.getByRole('button', { name: /Open sidebar|Expand sidebar|Toggle sidebar/i }).first()
-        await toggle.click()
-      }
+      if (mobile && !await item.isVisible()) await page.getByRole('button', { name: 'Open sidebar', exact: true }).click()
       await item.click()
+    }
+    async function showActivity() {
+      const section = page.locator(native).first()
+      if (!await section.isVisible()) await page.getByRole('button', { name: /^Thought for / }).first().click()
+      await section.waitFor({ state: 'visible', timeout: 3000 })
     }
     try {
       await page.goto(url.href, { waitUntil: 'domcontentloaded' })
       await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor()
       await openSession(firstTitle)
       await page.locator(native).first().waitFor({ state: 'attached' })
+      await showActivity()
       const before = await page.locator(native).allTextContents()
       assert(before.some(text => /Bash|Read|Think/.test(text)), 'Fixture must contain real native activity')
       const sessionId = reads[0]?.sessionId
@@ -58,6 +61,7 @@ try {
       await openSession(firstTitle)
       // Host reads are held: this can succeed only with the retained browser history.
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) === JSON.stringify(before), { native, before }, { timeout: 3000 })
+      await showActivity()
       const resumed = reads.filter(read => read.held && read.sessionId === sessionId)
       assert(resumed.length > 0, 'Returning must start incremental catch-up')
       assert(resumed.every(read => read.method === 'activity/read-after' && read.afterSeq > 0), 'Returning must not reread from zero')
