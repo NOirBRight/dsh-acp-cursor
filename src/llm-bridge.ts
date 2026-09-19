@@ -408,7 +408,7 @@ export function createCursorAgentLlmBridge(
               } }])
               return
             }
-            hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind, text } }])
+            hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind, source: 'assistant', text } }])
           }
           else if (event.type === 'tool-activity') {
             const seen = emittedToolIds.get(key) ?? new Set<string>()
@@ -419,7 +419,7 @@ export function createCursorAgentLlmBridge(
           }
           else if (event.type === 'plan-update') {
             const text = formatPlanUpdate(event)
-            if (text.length > 0) hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind: 'text', text } }])
+            if (text.length > 0) hostAsk?.appendToolEvents?.(options.sessionId, [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: CURSOR_AGENT_PARENT_TRAJECTORY, kind: 'text', source: 'plan', text } }])
           }
           // Stock Agent chrome: drop ACP usage. Do not yield TokenUsage.
         },

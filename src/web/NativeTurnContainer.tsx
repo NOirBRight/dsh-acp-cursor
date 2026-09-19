@@ -14,7 +14,7 @@ import type { ChatNode, ChatSnapshot } from '@deepseek-ai/dsh-client-ui-chat/cli
 import type { UiConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { getNativeHistoryStore, type ActivityRpc, type CursorAgentToolRowData } from './native-activity.js'
-import { isOwnedByTurn, nextStartMs, rowsForTurnWindow, type TurnStart } from './native-turn.js'
+import { isOwnedByTurn, nextStartMs, rowsForTurnWindow, visibleNativeTexts, type TurnStart } from './native-turn.js'
 import { NativeActivityNode } from './NativeActivityNode.js'
 import { groupNativeActivity } from './native-tree.js'
 import type { AcpSettingsKey } from './locales.ts'
@@ -76,10 +76,17 @@ export function NativeTurnContainer(props: { readonly node: ChatNode<'cursor-age
     if (knownIndex < 0) return EMPTY_NATIVE_ROWS
     return rowsForTurnWindow(history.rows, startMs, followingStartMs, Date.now(), includeEarlier)
   }, [history.rows, startMs, followingStartMs, includeEarlier, knownIndex])
+  // Keep the canonical answer for copy/history; only its sidecar preview retires.
+  const answers = chatSnapshot?.locations.getTurn(turn).flatMap(key => {
+    const node = chatSnapshot.nodes.get(key) as ChatNode | undefined
+    if (node?.kind !== 'assistant-step' || node.visibility !== 'visible') return []
+    const text = node.data.blocks.flatMap(block => block.kind === 'text' ? [block.text] : []).join('')
+    return text.length > 0 ? [text] : []
+  }) ?? []
   const branches = useMemo(() => groupNativeActivity(rows, knownIndex < 0 ? [] :
     rowsForTurnWindow(history.agents, startMs, followingStartMs, Date.now(), includeEarlier),
-  knownIndex < 0 ? [] : rowsForTurnWindow(history.texts ?? [], startMs, followingStartMs, Date.now(), includeEarlier)),
-  [rows, history.agents, history.texts, knownIndex, startMs, followingStartMs, includeEarlier])
+  knownIndex < 0 ? [] : visibleNativeTexts(rowsForTurnWindow(history.texts ?? [], startMs, followingStartMs, Date.now(), includeEarlier), answers)),
+  [rows, history.agents, history.texts, knownIndex, startMs, followingStartMs, includeEarlier, answers])
   if (branches.length === 0 && history.error === undefined) return null
   return <section data-cursor-agent-native-turn={turn} style={wrap}>
     <style>{nativeCss}</style>

@@ -125,9 +125,9 @@ function atTextBoundary(text: string): boolean {
   return closer !== -1 && /^\n?[ \t]*$/.test(text.slice(closer + 4))
 }
 
-/** Stable merge key: trajectory, parent and kind must match, undefined included. */
+/** Stable merge key: trajectory, parent, kind and source must match, undefined included. */
 function textKey(data: CursorAgentAgentTextData): string {
-  return data.trajectoryId + '\u0000' + (data.parentTrajectoryId ?? '') + '\u0000' + data.kind
+  return data.trajectoryId + '\u0000' + (data.parentTrajectoryId ?? '') + '\u0000' + data.kind + '\u0000' + (data.source ?? '')
 }
 
 /**

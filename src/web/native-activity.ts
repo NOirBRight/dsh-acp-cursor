@@ -68,6 +68,7 @@ export interface CursorAgentAgentTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   readonly text: string
 }
 
@@ -79,6 +80,7 @@ export interface NativeActivityTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   text: string
 }
 
@@ -118,7 +120,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
     }
     if (record.type === CURSOR_AGENT_TEXT) {
       const last = state.texts.at(-1)
-      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
+      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.source === record.data.source && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
         last.text += record.data.text
         continue
       }
@@ -129,6 +131,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
         trajectoryId: record.data.trajectoryId,
         ...(record.data.parentTrajectoryId === undefined ? {} : { parentTrajectoryId: record.data.parentTrajectoryId }),
         kind: record.data.kind,
+        ...(record.data.source === undefined ? {} : { source: record.data.source }),
         text: record.data.text,
       })
       continue

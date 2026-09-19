@@ -16,7 +16,7 @@ Requires `dsh-llm-providers-ui` 0.2.9 on the Host (shared ProviderDetail templat
 dsh plugin --profile web add --force \
   https://github.com/NOirBRight/dsh-llm-providers-ui/releases/download/v0.2.9/dsh-llm-providers-ui-0.2.9.tgz \
   https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.5/deepseek-ai-dsh-acp-provider-0.1.5.tgz \
-  https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.21/deepseek-ai-dsh-acp-cursor-0.1.21.tgz
+  https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.22/deepseek-ai-dsh-acp-cursor-0.1.22.tgz
 ```
 
 Missing CLI: Settings → Cursor → Install (official `curl https://cursor.com/install`). Sign-in is `cursor-agent login` (DeepControl link; host does not open a browser). Quota uses the same CLI token. Sign-out runs `cursor-agent logout` on this machine.

@@ -1,3 +1,8 @@
+## v0.1.22
+
+- Show Cursor summaries once while retaining the canonical answer for copying and conversation history.
+- Preserve independent plan updates by carrying their source through activity persistence and folding; conservatively deduplicate older records without source metadata.
+
 ## v0.1.21
 
 - Strip a trailing HTTP/2 `CANCEL` / `RetriableError` dump after a real answer so the leak is not stored as the reply.
