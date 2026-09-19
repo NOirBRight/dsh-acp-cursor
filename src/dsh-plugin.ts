@@ -353,6 +353,12 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
           if (selected.provider !== undefined && selected.provider !== 'cursor-agent') throw new Error('Cursor native turn refused: ' + selected.provider + '/' + selected.model)
           return { model: selected.model, ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
         },
+        readImage: async (attachment, signal) => {
+          const store = ctx.get?.('attachments') as { readImage?: (ref: unknown, signal?: AbortSignal) => Promise<{ data: Uint8Array; ref: { mediaType: string; name?: string } }> } | undefined
+          if (store?.readImage === undefined) throw new Error('CursorAgent image input requires the durable attachment service')
+          const stored = await store.readImage(attachment, signal)
+          return { data: stored.data, mimeType: stored.ref.mediaType, ...(typeof stored.ref.name === 'string' ? { name: stored.ref.name } : {}) }
+        },
         resolvePolicy: sessionId => resolveSandboxPolicy(ctx, sessionId),
         requestApproval: input => requestNativeApproval(ctx, input),
       })
