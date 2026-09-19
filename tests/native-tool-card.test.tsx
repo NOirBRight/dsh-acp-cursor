@@ -106,6 +106,7 @@ it('keeps bounded recorded read and diff payloads valid JSON for the real render
   for (const [name, output, marker] of [
     ['Read', { content: 'file line\n'.repeat(2000) }, 'data-read-block'],
     ['Edit', [{ type: 'diff', path: '/tmp/a', oldText: 'before\n'.repeat(2000), newText: 'after\n'.repeat(2000) }], 'data-diff-block'],
+    ['Read', Array.from({ length: 150 }, (_, i) => ({ type: 'content', content: { type: 'text', text: `short line ${i}` } })), 'data-native-io'],
   ] as const) {
     const events = toDurableToolEvents({ toolId: '1', name, status: 'completed', input: JSON.stringify({ path: '/tmp/a' }), output: JSON.stringify(output) }, new Set(['1']))
     const update = events.find(event => event.type === CURSOR_AGENT_TOOL_UPDATE)!

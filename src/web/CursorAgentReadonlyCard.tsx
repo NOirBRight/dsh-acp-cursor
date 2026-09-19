@@ -191,7 +191,7 @@ function ToolBody({ toolName, args, result, state, t }: {
       ? [shell.stdout, shell.stderr].filter((part): part is string => typeof part === 'string').join('') : undefined)
     if (toolName === 'bash' && typeof command === 'string' && (result === undefined || terminalOutput !== undefined)) {
       const exitCode = shell.exitCode ?? shell.exit_code
-      return inspectable(<TerminalBlock command={command} output={terminalOutput} running={state === 'running'} maxLines={Infinity}
+      return inspectable(<TerminalBlock command={command} output={terminalOutput} running={state === 'running'}
         cwd={typeof input.workdir === 'string' ? input.workdir : undefined}
         exitCode={typeof exitCode === 'number' && Number.isInteger(exitCode) ? exitCode : undefined}
         labels={{ ...labels('terminal'), signal: signal => t('terminal.signal', { signal }), exitCode: code => t('terminal.exitCode', { code }),
