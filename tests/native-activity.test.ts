@@ -347,7 +347,7 @@ describe('native history subscription', () => {
     expect(calls).toHaveLength(2)
   })
 
-  it('drops a page superseded by unsubscribe so a remount starts clean', async () => {
+  it('never applies an initial page superseded by unsubscribe', async () => {
     const calls: string[] = []
     let release: (() => void) | undefined
     const held = new Promise<void>(resolve => { release = resolve })
@@ -364,7 +364,7 @@ describe('native history subscription', () => {
     unsubscribe()
     release?.()
     await settle()
-    // The superseded read must not resurrect the torn-down fold or its cursor.
+    // No page was accepted: the superseded response must not establish a fold.
     expect(store.getSnapshot().rows).toEqual([])
 
     store.subscribe(() => undefined)
