@@ -59,7 +59,7 @@ function aliasArgs(parsed: Record<string, unknown> | undefined): Record<string, 
   return args
 }
 
-function parseRecord(raw: string): Record<string, unknown> | undefined {
+export function parseRecord(raw: string): Record<string, unknown> | undefined {
   try {
     const value: unknown = JSON.parse(raw)
     return typeof value === 'object' && value !== null && !Array.isArray(value)

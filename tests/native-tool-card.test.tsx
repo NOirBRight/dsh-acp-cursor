@@ -90,6 +90,16 @@ it('classifies expanded native payloads rather than showing two JSON code blocks
   expect(render('Read', { path: '/tmp/a' }, '')).toContain('data-card-empty-result')
   expect(render('Update TODOs: native plan', { todos: [{ content: 'native task', status: 'TODO_STATUS_PENDING' }] }, '')).toContain('data-native-io')
   expect(render('Write', { path: '/tmp/a', content: 'new file' }, '')).toContain('data-diff-block')
+  const created = render('Write', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: '++ b//tmp/a\nnew file' }]))
+  expect(created).toContain('&quot;oldText&quot;:null')
+  expect(created).toContain('&quot;newText&quot;:&quot;new file&quot;')
+  expect(render('Write', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: '++ b//tmp/a' }]))).toContain('&quot;oldText&quot;:null,&quot;newText&quot;:&quot;&quot;')
+  // Literal file content must not be rewritten just because it resembles one header.
+  expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: 'literal text' }]))).toContain('-- /dev/null')
+  expect(render('Read', { path: '/tmp/a', offset: 5 }, JSON.stringify({ content: 'line', totalLines: 90 }))).toContain('&quot;totalLines&quot;:90')
+  expect(render('Shell', { command: 'run' }, '[INFO] real log')).toContain('data-terminal-block')
+  expect(generic).not.toContain('aria-expanded') // no duplicate Inspect surface on a fallback
+  expect(generic.match(/data-native-copy/g)).toHaveLength(2)
 })
 
 it('keeps bounded recorded read and diff payloads valid JSON for the real render path', () => {
