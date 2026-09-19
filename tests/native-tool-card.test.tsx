@@ -3,6 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   DisclosureRow: (props: { title: string; collapsedContent?: unknown; children?: unknown }) => <div data-disclosure-row="">{props.title}{props.collapsedContent}{props.children}</div>,
+  ReadBlock: (props: unknown) => <div data-read-block="">{JSON.stringify(props)}</div>,
+  DiffBlock: (props: unknown) => <div data-diff-block="">{JSON.stringify(props)}</div>,
+  TerminalBlock: (props: unknown) => <div data-terminal-block="">{JSON.stringify(props)}</div>,
   writeClipboard: async () => true,
   IconApiOutline14: () => null,
   IconBrowseOutline16: () => null,
@@ -10,11 +13,13 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconGlobeOutline14: () => null,
   IconSearchOutline16: () => null,
   IconSparkle16: () => null,
+  IconChecklistOutline14: () => null,
 }))
 
 import { CursorAgentToolNode } from '../src/web/CursorAgentToolNode.tsx'
 import { nativeToolName, nativeToolSummary } from '../src/web/native-tool-card.ts'
 import { nativeTurnDefinition } from '../src/web/native-turn.ts'
+import { toDurableToolEvents, CURSOR_AGENT_TOOL_UPDATE, CURSOR_AGENT_MAX_TOOL_TEXT_CHARS } from '../src/tool-events.ts'
 
 const t = (key: string) => key
 const conversationT = (key: string) => key.split('.').pop() ?? key
@@ -26,6 +31,10 @@ describe('nativeToolName', () => {
     expect(nativeToolName('git status -sb')).toBe('bash')
     expect(nativeToolName('unknown', JSON.stringify({ command: 'echo hi' }))).toBe('bash')
     expect(nativeToolName('Running view file')).toBe('read')
+    expect(nativeToolName('Edit /tmp/a')).toBe('edit')
+    expect(nativeToolName('Write /tmp/a')).toBe('write')
+    expect(nativeToolName('Todo_write')).toBe('todo_write')
+    expect(nativeToolName('Update TODOs: next task')).toBe('todo_write')
   })
   it('summarizes Read path from the ACP title when args omit it', () => {
     expect(nativeToolSummary({ toolId: '1', name: 'Read /tmp/a', status: 'completed' }, 'read')).toBe('/tmp/a')
@@ -41,9 +50,61 @@ it('renders DSH disclosure chrome instead of a custom details card', () => {
   expect(html).not.toContain('<details')
   expect(html).toContain('>read<')
   expect(html).toContain('/tmp/a')
-  expect(html).toContain('data-native-copy')
-  expect(html).toContain('data-native-download')
-  expect(html).toContain('margin-left:auto')
+  expect(html).toContain('data-read-block')
+  expect(html).not.toContain('data-native-download')
+})
+
+it('classifies expanded native payloads rather than showing two JSON code blocks', () => {
+  const render = (name: string, input: object, output: string, status: 'completed' | 'failed' = 'completed') => renderToStaticMarkup(<CursorAgentToolNode t={t} conversationT={conversationT as never} row={{
+    key: '1', epoch: 1, firstSeenAt: '', time: '',
+    state: { toolId: '1', name, status, input: JSON.stringify(input), output },
+  }} />)
+  const read = render('Read', { path: '/tmp/spec.md', offset: 3 }, JSON.stringify({ content: 'first\nsecond' }))
+  expect(read).toContain('data-read-block')
+  expect(read).toContain('&quot;number&quot;:3')
+  expect(read).not.toContain('\\\\n')
+  expect(render('Edit', { path: '/tmp/a', old_string: 'before', new_string: 'after' }, 'ok')).toContain('data-diff-block')
+  expect(render('Shell', { command: 'pwd' }, JSON.stringify({ stdout: '/tmp\n', exitCode: 0 }))).toContain('data-terminal-block')
+  const generic = render('todo_write', { todos: [] }, 'Updated todo list')
+  expect(generic).toContain('data-native-io')
+  expect(generic).toContain('>input<')
+  expect(generic).toContain('>output<')
+  expect(generic).not.toContain('data-native-download')
+  const failed = render('Read', { path: '/tmp/a' }, 'Permission denied', 'failed')
+  expect(failed).not.toContain('data-read-block')
+  expect(failed).toContain('Permission denied')
+  const acpText = render('Read', { path: '/tmp/a' }, JSON.stringify([{ type: 'content', content: { type: 'text', text: 'file body' } }]))
+  expect(acpText).toContain('data-read-block')
+  expect(acpText).toContain('file body')
+  expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: 'before', newText: 'after' }]))).toContain('data-diff-block')
+  expect(render('Write', { path: '/tmp/a', content: 'new file' }, 'ok')).toContain('data-diff-block')
+  const unknown = render('Read', { path: '/tmp/a' }, JSON.stringify({ unrecognized: ['do not hide'] }))
+  expect(unknown).toContain('data-native-io')
+  expect(unknown).toContain('do not hide')
+  const mixed = render('Read', { path: '/tmp/a' }, JSON.stringify([{ type: 'text', text: 'text' }, { type: 'image', data: 'retained' }]))
+  expect(mixed).toContain('data-native-io')
+  expect(mixed).toContain('retained')
+  expect(render('todo_write', { todos: [{ content: 'next task', status: 'in_progress' }] }, 'ok')).toContain('next task')
+  expect(render('Update TODOs: original summary', { todos: [{ content: 'current task', status: 'TODO_STATUS_IN_PROGRESS' }] }, 'ok')).toContain('data-card-summary="completed · current task"')
+  expect(render('Read', { path: '/tmp/a' }, '{"content":"cut off')).not.toContain('data-read-block')
+  expect(render('Read', { path: '/tmp/a' }, '')).toContain('data-card-empty-result')
+  expect(render('Update TODOs: native plan', { todos: [{ content: 'native task', status: 'TODO_STATUS_PENDING' }] }, '')).toContain('data-native-io')
+  expect(render('Write', { path: '/tmp/a', content: 'new file' }, '')).toContain('data-diff-block')
+})
+
+it('keeps bounded recorded read and diff payloads valid JSON for the real render path', () => {
+  for (const [name, output, marker] of [
+    ['Read', { content: 'file line\n'.repeat(2000) }, 'data-read-block'],
+    ['Edit', [{ type: 'diff', path: '/tmp/a', oldText: 'before\n'.repeat(2000), newText: 'after\n'.repeat(2000) }], 'data-diff-block'],
+  ] as const) {
+    const events = toDurableToolEvents({ toolId: '1', name, status: 'completed', input: JSON.stringify({ path: '/tmp/a' }), output: JSON.stringify(output) }, new Set(['1']))
+    const update = events.find(event => event.type === CURSOR_AGENT_TOOL_UPDATE)!
+    expect(update.data.output!.length).toBeLessThanOrEqual(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS)
+    expect(() => JSON.parse(update.data.output!)).not.toThrow()
+    expect(update.data.output).toContain('[truncated]')
+    const html = renderToStaticMarkup(<CursorAgentToolNode t={t} conversationT={conversationT as never} row={{ key: '1', epoch: 1, firstSeenAt: '', time: '', state: { ...update.data, name } }} />)
+    expect(html).toContain(marker)
+  }
 })
 
 it('starts once per turn on turn/start; later steps in the same turn are updates', () => {

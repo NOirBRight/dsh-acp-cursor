@@ -20,6 +20,12 @@ const NATIVE_TOOL_NAMES: Record<string, string> = {
   glob: 'glob',
   'write file': 'write',
   'edit file': 'edit',
+  edit: 'edit',
+  write: 'write',
+  'str replace': 'edit',
+  'str replace editor': 'edit',
+  'todo write': 'todo_write',
+  'update todos': 'todo_write',
 }
 
 /** Native argument aliases to canonical DSH argument keys, each verified
@@ -77,6 +83,9 @@ export function nativeToolName(name: string, input?: string): string {
   if (folded === 'grep' || folded.startsWith('grep ') || folded === 'find' || folded.startsWith('find ')) return 'grep'
   if (folded === 'glob' || folded.startsWith('glob ')) return 'glob'
   if (folded === 'read' || folded.startsWith('read ') || folded.startsWith('read/')) return 'read'
+  if (folded.startsWith('update todos:')) return 'todo_write'
+  if (folded.startsWith('edit ')) return 'edit'
+  if (folded.startsWith('write ')) return 'write'
   if (folded === 'shell' || folded === 'terminal' || folded === 'command') return 'bash'
   if (folded.startsWith('web fetch') || folded.startsWith('fetch ')) return 'web_fetch'
   if (folded.startsWith('search ')) return 'web_search'
