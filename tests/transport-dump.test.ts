@@ -7,6 +7,7 @@ const CANCEL = 'Error: RetriableError: [canceled] http/2 stream closed with erro
 const ITERABLE = 'Error: RetriableError: WritableIterable is closed'
 const UNAVAILABLE = 'Error: ConnectError: [unavailable] transport closed'
 const ABORTED = 'Error: ConnectError: [aborted] aborted'
+const CANCELED_CONNECT = 'Error: ConnectError: [canceled] http/2 stream closed with error code CANCEL (0x8)'
 const DEADLINE = 'Error: ConnectError: [deadline_exceeded] timed out'
 const SERVER = 'Something went wrong communicating with the server. Please try again.'
 const INTERNAL = 'Error: RetriableError: [internal] Failed to run step, exceeded max retries'
@@ -44,14 +45,18 @@ function sessionWithChunks(chunks: string[], promptResult: unknown = { stopReaso
 
 async function runDump(chunks: string[], promptResult?: unknown) {
   const { session } = sessionWithChunks(chunks, promptResult)
+  const turnHost = host()
   const result = await session.runTurn({
     turn: turnId('dump'),
     prompt: 'Continue.',
     permissionMode: 'approval-required',
     signal: new AbortController().signal,
-  }, host())
+  }, turnHost)
   await session.dispose()
-  return result
+  const published = vi.mocked(turnHost.publish).mock.calls.flatMap(([event]) => (
+    event.type === 'assistant-delta' ? [event.text] : []
+  )).join('')
+  return { ...result, published }
 }
 
 it('fails a native turn whose assistant text is only a CANCEL transport dump', async () => {
@@ -75,6 +80,7 @@ it('fails WritableIterable and ConnectError unavailable dumps', async () => {
   expect((await runDump([ITERABLE])).status).toBe('failed')
   expect((await runDump([UNAVAILABLE])).status).toBe('failed')
   expect((await runDump([ABORTED])).status).toBe('failed')
+  expect((await runDump([CANCELED_CONNECT])).status).toBe('failed')
   expect((await runDump([DEADLINE])).status).toBe('failed')
   expect((await runDump([SERVER])).status).toBe('failed')
 })
@@ -84,8 +90,23 @@ it('fails a dump delivered in streamed chunks or with a stack', async () => {
   expect((await runDump([CANCEL, '\n    at send (cli.js:1:2)\n'])).status).toBe('failed')
 })
 
-it('completes mixed prose, fenced dumps, and agent-loop exhaustion', async () => {
-  expect((await runDump(['I inspected the files.\n' + CANCEL])).status).toBe('completed')
+it('strips a trailing CANCEL dump after a real answer and keeps the turn completed', async () => {
+  const result = await runDump(['I inspected the files.\n\n' + CANCEL])
+  expect(result.status).toBe('completed')
+  expect(result.text).toBe('I inspected the files.')
+  expect(result.published).toBe('I inspected the files.')
+  expect(result.published.includes('RetriableError')).toBe(false)
+})
+
+it('strips a trailing CANCEL dump streamed after a real answer', async () => {
+  const result = await runDump(['occupant 注册，并让后到的声明跳过已占用的 hole。\n\n', ...CANCEL])
+  expect(result.status).toBe('completed')
+  expect(result.text).toBe('occupant 注册，并让后到的声明跳过已占用的 hole。')
+  expect(result.published.includes('RetriableError')).toBe(false)
+  expect(result.published.includes('CANCEL')).toBe(false)
+})
+
+it('completes fenced dumps, quoted dumps, and agent-loop exhaustion', async () => {
   expect((await runDump(['```text\n' + CANCEL + '\n```'])).status).toBe('completed')
   expect((await runDump(['the error was "' + CANCEL + '"'])).status).toBe('completed')
   expect((await runDump([INTERNAL])).status).toBe('completed')
@@ -112,4 +133,14 @@ it('keeps structured ACP errors and stopReason error/refusal as ordinary failed 
 
 it('completes an ordinary answer', async () => {
   expect((await runDump(['Done.'])).status).toBe('completed')
+})
+
+it('keeps a last line that only looks like an in-progress dump prefix', async () => {
+  const result = await runDump(['The build failed.\nError'])
+  expect(result.status).toBe('completed')
+  expect(result.text).toBe('The build failed.\nError')
+  expect(result.published).toBe('The build failed.\nError')
+  const streamed = await runDump(['The build failed.\n', 'Error'])
+  expect(streamed.text).toBe('The build failed.\nError')
+  expect(streamed.published).toBe('The build failed.\nError')
 })

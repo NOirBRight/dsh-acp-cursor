@@ -1,3 +1,8 @@
+## v0.1.21
+
+- Strip a trailing HTTP/2 `CANCEL` / `RetriableError` dump after a real answer so the leak is not stored as the reply.
+- Forward user image attachments into Cursor ACP `session/prompt` as `image` blocks. Path images are read as bytes instead of `resource_link`.
+
 ## v0.1.20
 
 - Read the live Cursor model selection from the modelSelection projection instead of the Agent's default route; a session created on another provider no longer fails every native turn as `Cursor model is not enabled`.
