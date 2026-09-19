@@ -1,3 +1,10 @@
+## v0.1.24
+
+- Expand native Read, Edit/Write and Shell cards using shared DSH read, diff and terminal views; retain compact copyable IN/OUT for other payloads and errors.
+- Recognize Cursor TODO titles/statuses, preserve bounded structured previews, and keep the source payload available through Inspect.
+- Normalize Cursor's new-file diff headers without inventing a deleted line; retain read-window counts and plain shell logs.
+- Preserve v0.1.23 history retention. No DSH core or image-draft persistence changes.
+
 ## v0.1.23
 
 - Keep displayed native activity when switching conversations; resume from the retained Activity sequence cursor instead of reloading history.

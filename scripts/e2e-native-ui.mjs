@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 
 // Existing GUI only. Login cookies stay in memory; never save HAR or storage state.
@@ -36,8 +37,16 @@ try {
   await composer.waitFor()
   assert.equal(nativeAsset.status(), 200)
   assert.equal(coreAsset.status(), 200)
-  assert((await nativeAsset.text()).includes('data-native-io'), 'live GUI serves the classified tool cards')
-  assert(!(await coreAsset.text()).includes('parkedDrafts'), 'withdrawn core draft patch is absent')
+  const nativeCode = await nativeAsset.text()
+  const coreCode = await coreAsset.text()
+  assert(nativeCode.includes('data-native-io'), 'live GUI serves the classified tool cards')
+  assert(!coreCode.includes('parkedDrafts'), 'withdrawn core draft patch is absent')
+  for (const [kind, path, served] of [['plugin', process.env.E2E_EXPECT_PLUGIN, nativeCode], ['core', process.env.E2E_EXPECT_CORE, coreCode]]) {
+    if (!path) continue
+    const source = await readFile(path, 'utf8')
+    assert(served.includes(source.replace(/\n\/\/# sourceMappingURL=.*$/u, '').trim()), `${kind} executable code matches the expected artifact`)
+    report[`${kind}SHA256`] = createHash('sha256').update(source).digest('hex')
+  }
   report.checks.push('Live GUI serves plugin layout fix without the withdrawn core patch')
   console.log('PASS live bundle checks')
 
