@@ -268,7 +268,7 @@ interface NativeHistoryEntry {
   /** Exclusive Activity sequence cursor of the retained fold: 0 until the first page lands. */
   cursor: number
   /** True after an accepted page establishes the fold, even if a later page is cancelled. */
-  retained: boolean
+  foldEstablished: boolean
   listeners: Set<() => void>
   timer: ReturnType<typeof setTimeout> | undefined
   controller: AbortController | undefined
@@ -296,7 +296,7 @@ function entryFor(rpc: ActivityRpc, sessionId: string): NativeHistoryEntry {
       snapshot: EMPTY_NATIVE_HISTORY,
       metrics: { pageCalls: 0, pageRecords: 0, resynchronizations: 0 },
       cursor: 0,
-      retained: false,
+      foldEstablished: false,
       listeners: new Set(),
       timer: undefined,
       controller: undefined,
@@ -335,8 +335,7 @@ async function followNativeHistory(sessionId: string, entry: NativeHistoryEntry,
   for (let page = 0; page < NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES; page++) {
     const next = await loadActivityPage(rpc, sessionId, entry.cursor, controller.signal, entry.metrics)
     if (entry.controller !== controller) return changed
-    // A later page can be cancelled: each accepted page establishes the fold.
-    entry.retained = true
+    entry.foldEstablished = true
     if (next.records.length === 0) {
       entry.cursor = next.nextCursor
       return changed
@@ -359,7 +358,7 @@ async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, r
   let error: string | undefined
   try {
     try {
-      if (!entry.retained) resetRetainedFold(entry)
+      if (!entry.foldEstablished) resetRetainedFold(entry)
       changed = await followNativeHistory(sessionId, entry, rpc, controller)
     } catch (caught) {
       if (!(caught instanceof StaleActivityCursorError)) throw caught
@@ -367,7 +366,7 @@ async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, r
       entry.metrics.resynchronizations += 1
       if (entry.controller !== controller) return
       resetRetainedFold(entry)
-      entry.retained = false
+      entry.foldEstablished = false
       // Publish the empty fold immediately so a deleted history cannot keep previous rows.
       entry.snapshot = snapshotOf(entry.state)
       notifyEntry(entry)
@@ -438,7 +437,7 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
       entry.controller = undefined
       if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
       // The next poll pages from Activity sequence cursor 0 and swaps the fold in as pages arrive.
-      entry.retained = false
+      entry.foldEstablished = false
       if (entry.listeners.size > 0) void pollNativeHistory(sessionId, entry, rpc)
     },
   }

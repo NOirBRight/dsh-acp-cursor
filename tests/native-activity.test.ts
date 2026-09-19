@@ -275,7 +275,7 @@ describe('native history subscription', () => {
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(2)
   })
 
-  it('retains displayed history across session switches and resumes after its cursor', async () => {
+  it('retains displayed history across session switches and resumes after its Activity sequence cursor', async () => {
     const { rpc, calls, records } = pagingFace([ready(1), start(2, 't1', owned), text(3, 'thinking')])
     const store = getNativeHistoryStore(rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)

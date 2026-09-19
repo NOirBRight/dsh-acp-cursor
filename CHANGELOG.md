@@ -1,3 +1,8 @@
+## v0.1.23
+
+- Keep displayed native activity when switching conversations; resume from the retained Activity sequence cursor instead of reloading history.
+- Retain each accepted page even when navigation cancels the initial page cycle, so returning cannot reset partially loaded history.
+
 ## v0.1.22
 
 - Show Cursor summaries once while retaining the canonical answer for copying and conversation history.
