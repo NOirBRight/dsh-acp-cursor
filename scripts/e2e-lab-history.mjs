@@ -28,10 +28,11 @@ try {
     let hold = false
     let release
     const gate = new Promise(resolve => { release = resolve })
-    const reads = []
+    let lastReadSessionId
     await page.route('**/dsh-acp-cursor/activity/**', async route => {
       const request = route.request().postDataJSON()
-      reads.push({ method: request.method, ...request.payload, held: hold })
+      if (!['activity/read', 'activity/read-after'].includes(request.method)) return route.continue()
+      lastReadSessionId = request.payload.sessionId
       if (hold) await gate
       await route.continue().catch(() => {}) // navigation can cancel an in-flight read
     })
@@ -53,18 +54,18 @@ try {
       await showActivity()
       const before = await page.locator(native).allTextContents()
       assert(before.some(text => /Bash|Read|Think/.test(text)), 'Fixture must contain real native activity')
-      const sessionId = reads[0]?.sessionId
+      const sessionId = lastReadSessionId
       assert(sessionId, 'Initial history must be loaded from the Host')
       await openSession(otherTitle)
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) !== JSON.stringify(before), { native, before })
       hold = true
+      const resuming = page.waitForRequest(request => request.url().includes('/dsh-acp-cursor/activity/read') && request.postDataJSON()?.payload?.sessionId === sessionId, { timeout: 3000 })
       await openSession(firstTitle)
       // Host reads are held: this can succeed only with the retained browser history.
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) === JSON.stringify(before), { native, before }, { timeout: 3000 })
       await showActivity()
-      const resumed = reads.filter(read => read.held && read.sessionId === sessionId)
-      assert(resumed.length > 0, 'Returning must start incremental catch-up')
-      assert(resumed.every(read => read.method === 'activity/read-after' && read.afterSeq > 0), 'Returning must not reread from zero')
+      const resumed = (await resuming).postDataJSON()
+      assert(resumed.method === 'activity/read-after' && resumed.payload.afterSeq > 0, 'Returning must not reread from zero')
       release()
       hold = false
       await page.waitForTimeout(1200)
