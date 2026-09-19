@@ -8,9 +8,9 @@ This is **not** `dsh-llm-cursor` (unofficial chat route, provider `cursor`). Thi
 
 ## Install
 
-Requires `dsh-llm-providers-ui` 0.2.8 on the Host (shared ProviderDetail template). `dsh-acp-provider` is a profile dependency with no bundle of its own.
+Requires `dsh-llm-providers-ui` 0.2.9 on the Host (shared ProviderDetail template). `dsh-acp-provider` is a profile dependency with no bundle of its own.
 
-`catalogId` / `binding` and the unresolved `unknown` account state are attached at runtime. Published 0.2.8 types omit those fields; they only take effect on a newer Owner.
+`catalogId` / `binding` and the unresolved `unknown` account state are attached at runtime. Native-agent bindings require the 0.2.9 provider UI types.
 
 ```sh
 dsh plugin --profile web add --force \

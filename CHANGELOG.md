@@ -1,9 +1,7 @@
-## Unreleased
-
-- Classify standalone Cursor ACP transport dumps as failed native turns and replay the user prompt once in the same Host stream.
-
 ## v0.1.19
 
+- Keep native SSE alive after every context injection and complete Cursor plan review, including `create_plan` / `ask_question` approval flows.
+- Classify standalone Cursor ACP transport dumps as failed native turns and replay the user prompt once in the same Host stream.
 - Bound native activity persistence and reads for concurrent Cursor ACP sessions.
 - Coalesce transient text/tool updates and flush durable activity at turn and lifecycle boundaries.
 - Treat a cursor whose CursorAgent history was deleted as stale, so the browser resynchronizes instead of reading an empty caught-up page (provider 0.1.5).
