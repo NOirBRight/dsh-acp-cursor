@@ -27,10 +27,10 @@ const TITLE_KEYS = {
   read: 'tool.title.read',
   todo_write: 'todo.rowTitle',
   bash: 'tool.title.bash',
-  grep: 'tool.title.search',
-  glob: 'tool.title.search',
-  web_search: 'tool.title.search',
-  web_fetch: 'tool.title.search',
+  grep: 'tool.title.grep',
+  glob: 'tool.title.glob',
+  web_search: 'tool.title.webSearch',
+  web_fetch: 'tool.title.webFetch',
   write: 'tool.title.write',
   edit: 'tool.title.edit',
 } as const
@@ -147,7 +147,8 @@ function ToolBody({ toolName, args, result, state, t }: {
   const input = parseRecord(args) ?? {}
   const output = result === undefined ? undefined : parse(result)
   // Legacy history cut JSON mid-string; never present that fragment as file content.
-  const unparsedJson = toolName === 'read' && typeof output === 'string' && output === result && /^[\s]*[\[{]/u.test(output)
+  const jsonStart = toolName === 'read' ? /^\s*[\[{]/u : /^\s*(?:\{|\[\s*[\[{"])/u
+  const unparsedJson = typeof output === 'string' && output === result && jsonStart.test(output)
   const text = unparsedJson ? undefined : outputText(output)
   if (toolName === 'read' && state !== 'error' && result === '') return inspectable(<div data-card-empty-result style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 13 }}>{t('terminal.noOutput')}</div>)
   const path = typeof input.file_path === 'string' ? input.file_path : typeof input.path === 'string' ? input.path : undefined

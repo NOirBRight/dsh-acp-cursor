@@ -98,6 +98,16 @@ it('classifies expanded native payloads rather than showing two JSON code blocks
   expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: 'literal text' }]))).toContain('-- /dev/null')
   expect(render('Read', { path: '/tmp/a', offset: 5 }, JSON.stringify({ content: 'line', totalLines: 90 }))).toContain('&quot;totalLines&quot;:90')
   expect(render('Shell', { command: 'run' }, '[INFO] real log')).toContain('data-terminal-block')
+  for (const fragment of ['{"stdout":"cut off', '[{"type":"content","content":']) {
+    const shell = render('Shell', { command: 'run' }, fragment)
+    expect(shell).toContain('data-native-io')
+    expect(shell).not.toContain('data-terminal-block')
+  }
+  for (const [name, title] of [['grep', 'grep'], ['glob', 'glob'], ['web_search', 'webSearch'], ['web_fetch', 'webFetch']] as const) {
+    const search = render(name, { query: 'needle' }, 'matches')
+    expect(search).toContain(`>${title}<`)
+    expect(search).toContain('data-native-io')
+  }
   expect(generic).not.toContain('aria-expanded') // no duplicate Inspect surface on a fallback
   expect(generic.match(/data-native-copy/g)).toHaveLength(2)
 })

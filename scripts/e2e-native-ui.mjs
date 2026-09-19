@@ -2,6 +2,30 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
+import ts from 'typescript'
+
+// Aggregated responses contain many plugins. Compare one complete registration, never a substring.
+function moduleDeclarations(code) {
+  const file = ts.createSourceFile('bundle.js', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  assert.equal(file.parseDiagnostics.length, 0, 'valid bundle syntax')
+  const modules = new Map()
+  for (const statement of file.statements) {
+    if (ts.isEmptyStatement(statement)) continue
+    assert(ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression), 'only module registrations at bundle top level')
+    const call = statement.expression
+    assert.equal(call.expression.getText(file), 'window.__ModuleLoader__.load')
+    const entry = call.arguments[0]
+    assert(entry && ts.isObjectLiteralExpression(entry), 'literal module registration')
+    const id = entry.properties.find(property => ts.isPropertyAssignment(property) && property.name.getText(file) === 'id')?.initializer
+    assert(id && ts.isStringLiteral(id) && !modules.has(id.text), 'unique literal module id')
+    modules.set(id.text, statement.getText(file))
+  }
+  return modules
+}
+const sample = 'window.__ModuleLoader__.load({id:"sample",factory:()=>{}});'
+assert.equal(moduleDeclarations(sample + '\n//# sourceMappingURL=x').size, 1)
+assert.throws(() => moduleDeclarations(sample + 'window.extraCode=true;'))
+assert.throws(() => moduleDeclarations(sample + sample))
 
 // Existing GUI only. Login cookies stay in memory; never save HAR or storage state.
 const { chromium } = await import(process.env.E2E_PLAYWRIGHT_MODULE ?? 'playwright')
@@ -41,11 +65,15 @@ try {
   const coreCode = await coreAsset.text()
   assert(nativeCode.includes('data-native-io'), 'live GUI serves the classified tool cards')
   assert(!coreCode.includes('parkedDrafts'), 'withdrawn core draft patch is absent')
-  for (const [kind, path, served] of [['plugin', process.env.E2E_EXPECT_PLUGIN, nativeCode], ['core', process.env.E2E_EXPECT_CORE, coreCode]]) {
-    if (!path) continue
+  for (const [kind, path, served] of [['plugin', process.env.E2E_EXPECT_PLUGIN ?? new URL('../lib/client.js', import.meta.url), nativeCode], ['core', process.env.E2E_EXPECT_CORE, coreCode]]) {
+    if (!path) { report.checks.push(`${kind} artifact equality not requested`); continue }
     const source = await readFile(path, 'utf8')
-    assert(served.includes(source.replace(/\n\/\/# sourceMappingURL=.*$/u, '').trim()), `${kind} executable code matches the expected artifact`)
+    const expected = moduleDeclarations(source)
+    assert.equal(expected.size, 1, 'one module per artifact')
+    const actual = moduleDeclarations(served)
+    for (const [id, declaration] of expected) assert(actual.get(id) === declaration, `${kind} complete module declaration matches the artifact`)
     report[`${kind}SHA256`] = createHash('sha256').update(source).digest('hex')
+    report.checks.push(`${kind} complete module matches the expected artifact`)
   }
   report.checks.push('Live GUI serves plugin layout fix without the withdrawn core patch')
   console.log('PASS live bundle checks')
