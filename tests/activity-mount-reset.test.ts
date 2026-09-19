@@ -6,8 +6,7 @@
  * changing" and the provider could never be remounted.
  */
 import { expect, it, vi } from 'vitest'
-import { apply, type DshPluginContext } from '../src/dsh-plugin.js'
-import { registerAcpSettingsRpc } from '../src/rpc.js'
+import { mountPlugin, runtimeConfig } from './support/mount-plugin.js'
 
 const bridgeState = vi.hoisted(() => ({ failReset: false, resets: 0 }))
 
@@ -35,21 +34,15 @@ vi.mock('../src/llm-bridge.js', () => ({
 }))
 
 it('releases the mount guard after a failed bridge reset so the next mount proceeds', async () => {
-  const handle = Object.assign(vi.fn(), { replace: vi.fn() })
-  const registerAdapter = vi.fn((_providers: string[], _adapter: unknown) => handle)
-  const effect = (fn: () => unknown) => { fn() }
-  const scope = { effect, llm: { registerAdapter }, connection: { rpc: { handle: vi.fn() } } }
-  const ctx = { ...scope, get: () => undefined, on: vi.fn(), inject: (_deps: string[], fn: (value: typeof scope) => void) => fn(scope) }
-  await apply(ctx as unknown as DshPluginContext)
-  const rpc = vi.mocked(registerAcpSettingsRpc).mock.calls[0]![1]
-  const base = { executablePath: '/bin/cursor-agent', harnessPath: '', stateDirectory: '/tmp/acp-mount-reset', instanceId: 'default', enabled: true, catalogOrder: [] }
+  const { deps } = await mountPlugin()
+  const base = runtimeConfig('/tmp/acp-mount-reset', { catalogOrder: [] })
 
   bridgeState.failReset = true
-  await expect(rpc.applyConfig({ ...base, model: 'gpt-5' })).rejects.toThrow('Unable to persist CursorAgent activity; native execution stopped.')
+  await expect(deps.applyConfig({ ...base, model: 'gpt-5' })).rejects.toThrow('Unable to persist CursorAgent activity; native execution stopped.')
 
   // The guard was released, so a later runtime change mounts instead of being
   // refused while the adapter is unrecoverable.
   bridgeState.failReset = false
-  await expect(rpc.applyConfig({ ...base, model: 'gpt-5-low' })).resolves.toBeUndefined()
+  await expect(deps.applyConfig({ ...base, model: 'gpt-5-low' })).resolves.toBeUndefined()
   expect(bridgeState.resets).toBe(2)
 })

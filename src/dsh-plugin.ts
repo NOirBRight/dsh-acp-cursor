@@ -116,6 +116,9 @@ function agentFor(ctx: DshPluginContext, sessionId: string | undefined): unknown
   return agents?.get?.(sessionId)
 }
 
+/** The modelSelection projection's entry shape, used by the live picker hand-off. */
+type ModelSelection = { provider?: string; model?: string; reasoningEffort?: string }
+
 /** File-effect policy modes shared with the sandbox-policy service (structural, no new dependency). */
 type SandboxPolicyMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
@@ -332,21 +335,22 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
           if (agent !== undefined) planMode?.set?.(agent, active)
         },
         resolveSelectedModel: sessionId => {
-          const agent = agentFor(ctx, sessionId) as {
-            session?: unknown
-            options?: { provider?: string; model?: string; reasoningEffort?: string }
-          } | undefined
+          const agent = agentFor(ctx, sessionId) as { session?: unknown } | undefined
           if (agent === undefined) return undefined
           const projections = ctx.get?.('sessionProjections') as {
             stateOf(session: unknown, key: 'modelSelection'): {
-              pending?: { provider?: string; model?: string; reasoningEffort?: string } | null
-              next?: { provider?: string; model?: string; reasoningEffort?: string } | null
+              pending?: ModelSelection | null
+              lastUsed?: ModelSelection | null
             } | undefined
           } | undefined
           const state = agent.session === undefined ? undefined : projections?.stateOf(agent.session, 'modelSelection')
-          const selected = state?.pending ?? state?.next ?? (agent.options?.model === undefined ? undefined : agent.options)
+          // Server-side stateOf returns the internal {lastUsed, pending}; the serialized view
+          // (`next`) is `pending ?? lastUsed`. The Agent's own route (agent.options) is the default
+          // it was created with, not this session's picker selection: reading it failed every
+          // native turn of a session created on another provider once pending was consumed.
+          const selected = state?.pending ?? state?.lastUsed
           if (selected?.model === undefined || selected.model === '') return undefined
-          if (selected.provider !== undefined && selected.provider !== 'cursor-agent') throw new Error('Cursor model is not enabled: ' + selected.model)
+          if (selected.provider !== undefined && selected.provider !== 'cursor-agent') throw new Error('Cursor native turn refused: ' + selected.provider + '/' + selected.model)
           return { model: selected.model, ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
         },
         resolvePolicy: sessionId => resolveSandboxPolicy(ctx, sessionId),
