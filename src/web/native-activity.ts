@@ -68,6 +68,7 @@ export interface CursorAgentAgentTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   readonly text: string
 }
 
@@ -79,6 +80,7 @@ export interface NativeActivityTextRow {
   readonly trajectoryId: string
   readonly parentTrajectoryId?: string
   readonly kind: 'text' | 'thought'
+  readonly source?: 'assistant' | 'plan'
   text: string
 }
 
@@ -118,7 +120,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
     }
     if (record.type === CURSOR_AGENT_TEXT) {
       const last = state.texts.at(-1)
-      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
+      if (last !== undefined && last.epoch === state.epoch && last.kind === record.data.kind && last.source === record.data.source && last.trajectoryId === record.data.trajectoryId && last.parentTrajectoryId === record.data.parentTrajectoryId) {
         last.text += record.data.text
         continue
       }
@@ -129,6 +131,7 @@ export function applyActivityRecords(state: NativeActivityFoldState, records: re
         trajectoryId: record.data.trajectoryId,
         ...(record.data.parentTrajectoryId === undefined ? {} : { parentTrajectoryId: record.data.parentTrajectoryId }),
         kind: record.data.kind,
+        ...(record.data.source === undefined ? {} : { source: record.data.source }),
         text: record.data.text,
       })
       continue
@@ -255,7 +258,7 @@ function copyNativeActivityMetrics(metrics: NativeActivityMetrics): NativeActivi
   return { ...metrics }
 }
 
-/** Shared empty snapshot: subscription teardown leaves no per-session history retained. */
+/** Shared empty snapshot until the first successful history read. */
 const EMPTY_NATIVE_HISTORY: NativeHistorySnapshot = { rows: [], agents: [], texts: [] }
 
 interface NativeHistoryEntry {
@@ -264,8 +267,8 @@ interface NativeHistoryEntry {
   metrics: NativeActivityMetrics
   /** Exclusive Activity sequence cursor of the retained fold: 0 until the first page lands. */
   cursor: number
-  /** True after a page cycle has established the fold; later polls follow the retained Activity sequence cursor. */
-  retained: boolean
+  /** True after an accepted page establishes the fold, even if a later page is cancelled. */
+  foldEstablished: boolean
   listeners: Set<() => void>
   timer: ReturnType<typeof setTimeout> | undefined
   controller: AbortController | undefined
@@ -274,8 +277,9 @@ interface NativeHistoryEntry {
 /** One entry per live connection and session: keying by the RPC face keeps
  * concurrent connections from sharing or resurrecting each other's history,
  * so a reconnecting connection pages from Activity sequence cursor 0 on its own RPC face.
- * Entries are lightweight once unsubscribed (empty snapshot, no cursor, no
- * timer), so React StrictMode remounts reuse them without holding histories.
+ * Unsubscribed entries retain history but no timer or active request.
+ * ponytail: histories live for the RPC lifetime; add inactive-session LRU eviction
+ * if browsing many large sessions makes retained memory significant.
  */
 const nativeHistoryStores = new WeakMap<ActivityRpc, Map<string, NativeHistoryEntry>>()
 
@@ -292,7 +296,7 @@ function entryFor(rpc: ActivityRpc, sessionId: string): NativeHistoryEntry {
       snapshot: EMPTY_NATIVE_HISTORY,
       metrics: { pageCalls: 0, pageRecords: 0, resynchronizations: 0 },
       cursor: 0,
-      retained: false,
+      foldEstablished: false,
       listeners: new Set(),
       timer: undefined,
       controller: undefined,
@@ -320,10 +324,6 @@ function resetRetainedFold(entry: NativeHistoryEntry): void {
   entry.cursor = 0
 }
 
-function markRetained(entry: NativeHistoryEntry, controller: AbortController): void {
-  if (entry.controller === controller) entry.retained = true
-}
-
 /** Apply bounded pages after the retained Activity sequence cursor.
  * Each non-empty page publishes the fold immediately so a long history cannot
  * hold the transcript on one unbounded transfer. A poll that still has more
@@ -335,6 +335,7 @@ async function followNativeHistory(sessionId: string, entry: NativeHistoryEntry,
   for (let page = 0; page < NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES; page++) {
     const next = await loadActivityPage(rpc, sessionId, entry.cursor, controller.signal, entry.metrics)
     if (entry.controller !== controller) return changed
+    entry.foldEstablished = true
     if (next.records.length === 0) {
       entry.cursor = next.nextCursor
       return changed
@@ -357,22 +358,20 @@ async function pollNativeHistory(sessionId: string, entry: NativeHistoryEntry, r
   let error: string | undefined
   try {
     try {
-      if (!entry.retained) resetRetainedFold(entry)
+      if (!entry.foldEstablished) resetRetainedFold(entry)
       changed = await followNativeHistory(sessionId, entry, rpc, controller)
-      markRetained(entry, controller)
     } catch (caught) {
       if (!(caught instanceof StaleActivityCursorError)) throw caught
       // The host history no longer contains this Activity sequence cursor: page again from 0.
       entry.metrics.resynchronizations += 1
       if (entry.controller !== controller) return
       resetRetainedFold(entry)
-      entry.retained = false
+      entry.foldEstablished = false
       // Publish the empty fold immediately so a deleted history cannot keep previous rows.
       entry.snapshot = snapshotOf(entry.state)
       notifyEntry(entry)
       changed = true
       changed = (await followNativeHistory(sessionId, entry, rpc, controller)) || changed
-      markRetained(entry, controller)
     }
   } catch (caught) {
     if (entry.controller !== controller) return
@@ -426,10 +425,8 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
           if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
           entry.controller?.abort()
           entry.controller = undefined
-          // Reset the Activity sequence cursor with the snapshot, so a remount pages from 0 instead of reading after dropped state.
-          resetRetainedFold(entry)
-          entry.retained = false
-          entry.snapshot = EMPTY_NATIVE_HISTORY
+          // Keep the fold and Activity sequence cursor together so navigation
+          // displays cached history immediately and resumes only missing pages.
         }
       }
     },
@@ -440,7 +437,7 @@ export function getNativeHistoryStore(rpc: ActivityRpc, sessionId: string): {
       entry.controller = undefined
       if (entry.timer !== undefined) { clearTimeout(entry.timer); entry.timer = undefined }
       // The next poll pages from Activity sequence cursor 0 and swaps the fold in as pages arrive.
-      entry.retained = false
+      entry.foldEstablished = false
       if (entry.listeners.size > 0) void pollNativeHistory(sessionId, entry, rpc)
     },
   }

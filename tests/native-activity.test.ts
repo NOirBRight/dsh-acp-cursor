@@ -275,25 +275,79 @@ describe('native history subscription', () => {
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(2)
   })
 
-  it('resets the Activity sequence cursor on unsubscribe so a remount pages from 0', async () => {
-    const { rpc, calls } = pagingFace([ready(1), start(2, 't1', owned)])
+  it('retains displayed history across session switches and resumes after its Activity sequence cursor', async () => {
+    const { rpc, calls, records } = pagingFace([ready(1), start(2, 't1', owned), text(3, 'thinking')])
     const store = getNativeHistoryStore(rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)
     await settle()
+    const displayed = store.getSnapshot()
     unsubscribe()
-    expect(store.getSnapshot().rows).toEqual([])
+    await pollAgain()
+    expect(calls).toHaveLength(1)
+    records.push(update(4, 't1', 'completed', owned), text(5, ' more'))
 
-    store.subscribe(() => undefined)
+    const remounted = getNativeHistoryStore(rpc, SESSION)
+    expect(remounted.getSnapshot()).toBe(displayed)
+    const stop = remounted.subscribe(() => undefined)
+    expect(remounted.getSnapshot()).toBe(displayed)
     await settle()
-    expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
-    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).map(call => call.payload)).toEqual([
-      { sessionId: SESSION, afterSeq: 0 },
-      { sessionId: SESSION, afterSeq: 0 },
+    expect(remounted.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
+    expect(remounted.getSnapshot().texts.map(row => row.text)).toEqual(['thinking more'])
+    expect(calls.map(call => [call.endpoint, call.payload])).toEqual([
+      [ACTIVITY_READ_AFTER_ENDPOINT, { sessionId: SESSION, afterSeq: 0 }],
+      [ACTIVITY_READ_AFTER_ENDPOINT, { sessionId: SESSION, afterSeq: 3 }],
     ])
+    stop()
   })
 
-  it('drops a page superseded by unsubscribe so a remount starts clean', async () => {
+  it('retains the first page when navigation cancels the initial page cycle', async () => {
+    let release: ((reply: Reply) => void) | undefined
+    const held = new Promise<Reply>(resolve => { release = resolve })
+    const cursors: number[] = []
+    let pendingSignal: AbortSignal | undefined
+    const rpc: ActivityRpc = {
+      call: async (_channel, _endpoint, payload, signal) => {
+        cursors.push(afterSeqOf(payload))
+        if (cursors.length === 1) return page([ready(1), start(2, 't1', owned)], 2, true)
+        if (cursors.length === 2) { pendingSignal = signal; return held }
+        return page([], afterSeqOf(payload), false)
+      },
+    }
+    const store = getNativeHistoryStore(rpc, SESSION)
+    const stop = store.subscribe(() => undefined)
+    await settle()
+    const displayed = store.getSnapshot()
+    expect(displayed.rows.map(row => row.key)).toEqual(['2'])
+    stop()
+    expect(pendingSignal?.aborted).toBe(true)
+    const stopAgain = store.subscribe(() => undefined)
+    expect(store.getSnapshot()).toBe(displayed)
+    await settle()
+    expect(cursors).toEqual([0, 2, 2])
+    expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
+    release?.(page([update(3, 't1', 'completed', owned)], 3, false))
+    await settle()
+    expect(store.getSnapshot().rows.map(row => row.state.status)).toEqual(['pending'])
+    stopAgain()
+  })
+
+  it('shares one poll across views and isolates another session', async () => {
+    const { rpc, calls } = pagingFace([ready(1), start(2, 't1', owned)])
+    const store = getNativeHistoryStore(rpc, SESSION)
+    const stopFirst = store.subscribe(() => undefined)
+    const stopSecond = getNativeHistoryStore(rpc, SESSION).subscribe(() => undefined)
+    await settle()
+    expect(calls).toHaveLength(1)
+    expect(getNativeHistoryStore(rpc, 'other-session').getSnapshot().rows).toEqual([])
+    stopFirst()
+    await pollAgain()
+    expect(calls).toHaveLength(2)
+    stopSecond()
+    await pollAgain()
+    expect(calls).toHaveLength(2)
+  })
+
+  it('never applies an initial page superseded by unsubscribe', async () => {
     const calls: string[] = []
     let release: (() => void) | undefined
     const held = new Promise<void>(resolve => { release = resolve })
@@ -310,7 +364,7 @@ describe('native history subscription', () => {
     unsubscribe()
     release?.()
     await settle()
-    // The superseded read must not resurrect the torn-down fold or its cursor.
+    // No page was accepted: the superseded response must not establish a fold.
     expect(store.getSnapshot().rows).toEqual([])
 
     store.subscribe(() => undefined)
