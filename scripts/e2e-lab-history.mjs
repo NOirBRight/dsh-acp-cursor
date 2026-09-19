@@ -28,11 +28,11 @@ try {
     let hold = false
     let release
     const gate = new Promise(resolve => { release = resolve })
-    const reads = []
+    let lastReadSessionId
     await page.route('**/dsh-acp-cursor/activity/**', async route => {
       const request = route.request().postDataJSON()
       if (!['activity/read', 'activity/read-after'].includes(request.method)) return route.continue()
-      reads.push({ method: request.method, ...request.payload, held: hold })
+      lastReadSessionId = request.payload.sessionId
       if (hold) await gate
       await route.continue().catch(() => {}) // navigation can cancel an in-flight read
     })
@@ -54,7 +54,7 @@ try {
       await showActivity()
       const before = await page.locator(native).allTextContents()
       assert(before.some(text => /Bash|Read|Think/.test(text)), 'Fixture must contain real native activity')
-      const sessionId = reads.at(-1)?.sessionId
+      const sessionId = lastReadSessionId
       assert(sessionId, 'Initial history must be loaded from the Host')
       await openSession(otherTitle)
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) !== JSON.stringify(before), { native, before })
