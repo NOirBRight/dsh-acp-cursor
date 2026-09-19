@@ -167,15 +167,15 @@ describe('native history subscription', () => {
   })
 
   it('pages from Activity sequence cursor 0 again after an Activity stale cursor', async () => {
-    let generation = 1
+    let wave = 1
     const { rpc, calls } = rpcFace((endpoint, payload) => {
       if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
       const afterSeq = afterSeqOf(payload)
-      if (generation === 1 && afterSeq > 0) {
-        generation = 2
+      if (wave === 1 && afterSeq > 0) {
+        wave = 2
         return stale()
       }
-      if (generation === 2) return pageFrom([ready(1), start(2, 't9', owned), update(3, 't9', 'completed', owned)], afterSeq)
+      if (wave === 2) return pageFrom([ready(1), start(2, 't9', owned), update(3, 't9', 'completed', owned)], afterSeq)
       return pageFrom([ready(1), start(2, 't1', owned)], afterSeq)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
@@ -233,15 +233,15 @@ describe('native history subscription', () => {
   })
 
   it('clears retained rows when an Activity stale cursor recovers an empty history', async () => {
-    let generation = 1
+    let wave = 1
     const { rpc } = rpcFace((endpoint, payload) => {
       if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
       const afterSeq = afterSeqOf(payload)
-      if (generation === 1 && afterSeq > 0) {
-        generation = 2
+      if (wave === 1 && afterSeq > 0) {
+        wave = 2
         return stale()
       }
-      if (generation === 2) return pageFrom([], afterSeq)
+      if (wave === 2) return pageFrom([], afterSeq)
       return pageFrom([ready(1), start(2, 't1', owned)], afterSeq)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
