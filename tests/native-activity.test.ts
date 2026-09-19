@@ -22,13 +22,20 @@ import {
 const SESSION = 'session-1'
 
 type Reply = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } }
+type SeqRecord = { readonly seq: number }
 
-function rpcFace(reply: (endpoint: string) => Reply): { rpc: ActivityRpc; calls: Array<{ endpoint: string; payload: unknown }> } {
+function afterSeqOf(payload: unknown): number {
+  return typeof payload === 'object' && payload !== null && typeof (payload as { afterSeq?: unknown }).afterSeq === 'number'
+    ? (payload as { afterSeq: number }).afterSeq
+    : -1
+}
+
+function rpcFace(reply: (endpoint: string, payload: unknown) => Reply): { rpc: ActivityRpc; calls: Array<{ endpoint: string; payload: unknown }> } {
   const calls: Array<{ endpoint: string; payload: unknown }> = []
   const rpc: ActivityRpc = {
     call: async (_channel, endpoint, payload) => {
       calls.push({ endpoint, payload })
-      return reply(endpoint)
+      return reply(endpoint, payload)
     },
   }
   return { rpc, calls }
@@ -38,19 +45,35 @@ function at(seq: number): string {
   return new Date(Date.UTC(2026, 8, 19, 0, 0, 0, seq)).toISOString()
 }
 
-const ready = (seq: number): unknown => ({ seq, time: at(seq), type: 'cursor-agent/session-ready', data: { provider: 'cursor-agent' } })
-const start = (seq: number, toolId: string, ownership?: unknown): unknown => ({ seq, time: at(seq), type: 'cursor-agent/tool-start', data: { toolId, name: 'shell', status: 'pending', ...(ownership === undefined ? {} : { ownership }) } })
-const update = (seq: number, toolId: string, status: string, ownership?: unknown): unknown => ({ seq, time: at(seq), type: 'cursor-agent/tool-update', data: { toolId, status, ...(ownership === undefined ? {} : { ownership }) } })
-const text = (seq: number, value: string, kind: 'text' | 'thought' = 'thought'): unknown => ({ seq, time: at(seq), type: 'cursor-agent/agent-text', data: { trajectoryId: 'traj-1', kind, text: value } })
+const ready = (seq: number): SeqRecord => ({ seq, time: at(seq), type: 'cursor-agent/session-ready', data: { provider: 'cursor-agent' } }) as SeqRecord
+const start = (seq: number, toolId: string, ownership?: unknown): SeqRecord => ({ seq, time: at(seq), type: 'cursor-agent/tool-start', data: { toolId, name: 'shell', status: 'pending', ...(ownership === undefined ? {} : { ownership }) } }) as SeqRecord
+const update = (seq: number, toolId: string, status: string, ownership?: unknown): SeqRecord => ({ seq, time: at(seq), type: 'cursor-agent/tool-update', data: { toolId, status, ...(ownership === undefined ? {} : { ownership }) } }) as SeqRecord
+const text = (seq: number, value: string, kind: 'text' | 'thought' = 'thought'): SeqRecord => ({ seq, time: at(seq), type: 'cursor-agent/agent-text', data: { trajectoryId: 'traj-1', kind, text: value } }) as SeqRecord
 
 const owned = { trajectoryId: 'traj-1' }
-const history = (records: readonly unknown[]): Reply => ({ ok: true, value: { version: 1, records } })
 const page = (records: readonly unknown[], nextCursor: number, hasMore: boolean): Reply => ({ ok: true, value: { version: 1, records, nextCursor, hasMore } })
 const stale = (): Reply => ({ ok: false, error: { code: ACTIVITY_STALE_CURSOR, message: 'CursorAgent activity cursor is stale; the history must be reloaded.' } })
+const forbiddenFullRead = (): Reply => ({ ok: false, error: { code: 'internal', message: 'full read is forbidden in this test' } })
+
+function pageFrom(records: readonly SeqRecord[], afterSeq: number, limit = records.length): Reply {
+  const slice = records.filter(record => record.seq > afterSeq).slice(0, limit)
+  const nextCursor = slice.at(-1)?.seq ?? afterSeq
+  const hasMore = records.some(record => record.seq > nextCursor)
+  return page(slice, nextCursor, hasMore)
+}
+
+function pagingFace(initial: readonly SeqRecord[], limit = initial.length) {
+  const records = [...initial]
+  const { rpc, calls } = rpcFace((endpoint, payload) => {
+    if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+    return pageFrom(records, afterSeqOf(payload), limit)
+  })
+  return { rpc, calls, records }
+}
 
 /** Drain the promise chain a poll schedules; no timers involved. */
 async function settle(): Promise<void> {
-  for (let turn = 0; turn < 12; turn++) await Promise.resolve()
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve()
 }
 
 /** Run the next poll: the store schedules it one poll interval ahead. */
@@ -63,25 +86,25 @@ describe('native history subscription', () => {
   beforeEach(() => { vi.useFakeTimers() })
   afterEach(() => { vi.useRealTimers() })
 
-  it('bootstraps once from a full read, then transfers only records after the cursor', async () => {
-    const { rpc, calls } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT
-      ? history([ready(1), start(2, 't1', owned)])
-      : page([update(3, 't1', 'completed')], 3, false))
+  it('pages from Activity sequence cursor 0, then transfers only records after the cursor', async () => {
+    const { rpc, calls, records } = pagingFace([ready(1), start(2, 't1', owned)])
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
 
+    records.push(update(3, 't1', 'completed', owned))
     await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(1)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).map(call => call.payload)).toEqual([
+      { sessionId: SESSION, afterSeq: 0 },
       { sessionId: SESSION, afterSeq: 2 },
     ])
   })
 
   it('keeps snapshot identity while a poll returns no new records', async () => {
-    const { rpc } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT ? history([ready(1), start(2, 't1', owned)]) : page([], 2, false))
+    const { rpc } = pagingFace([ready(1), start(2, 't1', owned)])
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
@@ -92,30 +115,29 @@ describe('native history subscription', () => {
   })
 
   it('retains pending unowned rows and reveals them at their original key once owned', async () => {
-    const { rpc } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT
-      ? history([ready(1), start(2, 't1')])
-      : page([update(3, 't1', 'running', owned)], 3, false))
+    const { rpc, records } = pagingFace([ready(1), start(2, 't1')])
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
     // Unowned pending previews stay out of the transcript but never leave the fold.
     expect(store.getSnapshot().rows).toEqual([])
 
+    records.push(update(3, 't1', 'running', owned))
     await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'running']])
   })
 
   it('carries epoch and text merging across page boundaries', async () => {
-    const { rpc } = rpcFace(endpoint => {
-      if (endpoint === ACTIVITY_ENDPOINT) return history([ready(1), text(2, 'a')])
-      return page([text(3, 'b'), text(4, 'c', 'text'), ready(5), text(6, 'd'), start(7, 't2', owned)], 7, false)
+    const { rpc } = rpcFace((endpoint, payload) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      const afterSeq = afterSeqOf(payload)
+      if (afterSeq === 0) return page([ready(1), text(2, 'a')], 2, true)
+      if (afterSeq === 2) return page([text(3, 'b'), text(4, 'c', 'text'), ready(5), text(6, 'd'), start(7, 't2', owned)], 7, false)
+      return page([], afterSeq, false)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
-    expect(store.getSnapshot().texts.map(row => row.text)).toEqual(['a'])
-
-    await pollAgain()
     const snapshot = store.getSnapshot()
     // Adjacent same-kind deltas merge across the page boundary; a new kind and a new
     // epoch each start their own row.
@@ -128,30 +150,33 @@ describe('native history subscription', () => {
   })
 
   it('follows bounded pages within one poll', async () => {
-    const { rpc, calls } = rpcFace(endpoint => {
-      if (endpoint === ACTIVITY_ENDPOINT) return history([ready(1)])
-      return calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).length === 1
-        ? page([start(2, 't1', owned)], 2, true)
-        : page([update(3, 't1', 'completed')], 3, false)
+    const { rpc, calls } = rpcFace((endpoint, payload) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      const afterSeq = afterSeqOf(payload)
+      if (afterSeq === 0) return page([ready(1)], 1, true)
+      if (afterSeq === 1) return page([start(2, 't1', owned)], 2, true)
+      if (afterSeq === 2) return page([update(3, 't1', 'completed', owned)], 3, false)
+      return page([], afterSeq, false)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
-    await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(2)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(3)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
   })
 
-  it('resynchronizes from a full read when the cursor is stale', async () => {
-    let bootstraps = 0
-    const { rpc, calls } = rpcFace(endpoint => {
-      if (endpoint === ACTIVITY_ENDPOINT) {
-        bootstraps += 1
-        return bootstraps === 1
-          ? history([ready(1), start(2, 't1', owned)])
-          : history([ready(1), start(2, 't9', owned), update(3, 't9', 'completed')])
+  it('pages from Activity sequence cursor 0 again after an Activity stale cursor', async () => {
+    let generation = 1
+    const { rpc, calls } = rpcFace((endpoint, payload) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      const afterSeq = afterSeqOf(payload)
+      if (generation === 1 && afterSeq > 0) {
+        generation = 2
+        return stale()
       }
-      return stale()
+      if (generation === 2) return pageFrom([ready(1), start(2, 't9', owned), update(3, 't9', 'completed', owned)], afterSeq)
+      return pageFrom([ready(1), start(2, 't1', owned)], afterSeq)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
@@ -160,34 +185,81 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
     expect(store.getSnapshot().error).toBeUndefined()
-    expect(store.getMetrics()).toEqual({ fullReadCalls: 2, pageCalls: 0, pageRecords: 0, resynchronizations: 1 })
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
+    expect(store.getMetrics()).toEqual({ pageCalls: 2, pageRecords: 5, resynchronizations: 1 })
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
   })
 
-  it('resynchronizes when the backlog exceeds the follow-up page budget', async () => {
-    let cursor = 3
+  it('continues paging on the next poll when the backlog exceeds the page budget', async () => {
+    let seq = 0
     const { rpc, calls } = rpcFace(endpoint => {
-      if (endpoint === ACTIVITY_ENDPOINT) return history([ready(1), start(2, 't1', owned), update(3, 't1', 'completed')])
-      cursor += 1
-      return page([start(cursor, 't' + String(cursor), owned)], cursor, true)
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      seq += 1
+      return page([start(seq, 't' + String(seq), owned)], seq, true)
     })
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
     await settle()
-    await pollAgain()
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES)
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
-    expect(store.getMetrics()).toEqual({ fullReadCalls: 2, pageCalls: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES, pageRecords: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES, resynchronizations: 1 })
-    expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
+    expect(store.getSnapshot().rows).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES)
+
+    await pollAgain()
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(store.getMetrics()).toEqual({
+      pageCalls: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2,
+      pageRecords: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2,
+      resynchronizations: 0,
+    })
+    expect(store.getSnapshot().rows).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2)
+  })
+
+  it('never requests a full read for a history deeper than one poll', async () => {
+    const pageLimit = 3
+    const total = NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * pageLimit + 2
+    const records = [ready(1), ...Array.from({ length: total - 1 }, (_, index) => start(index + 2, 't' + String(index + 2), owned))]
+    const { rpc, calls } = pagingFace(records, pageLimit)
+    const store = getNativeHistoryStore(rpc, SESSION)
+    const rowCounts: number[] = []
+    store.subscribe(() => { rowCounts.push(store.getSnapshot().rows.length) })
+    await settle()
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(store.getSnapshot().rows.length).toBeLessThan(total - 1)
+    expect(store.getSnapshot().rows.length).toBeGreaterThan(0)
+    expect(rowCounts[0]).toBeGreaterThan(0)
+
+    await pollAgain()
+    expect(store.getSnapshot().rows).toHaveLength(total - 1)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+  })
+
+  it('clears retained rows when an Activity stale cursor recovers an empty history', async () => {
+    let generation = 1
+    const { rpc } = rpcFace((endpoint, payload) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      const afterSeq = afterSeqOf(payload)
+      if (generation === 1 && afterSeq > 0) {
+        generation = 2
+        return stale()
+      }
+      if (generation === 2) return pageFrom([], afterSeq)
+      return pageFrom([ready(1), start(2, 't1', owned)], afterSeq)
+    })
+    const store = getNativeHistoryStore(rpc, SESSION)
+    store.subscribe(() => undefined)
+    await settle()
+    expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
+    await pollAgain()
+    expect(store.getSnapshot().rows).toEqual([])
+    expect(store.getSnapshot().error).toBeUndefined()
+    expect(store.getMetrics().resynchronizations).toBe(1)
   })
 
   it('surfaces a failed read and recovers on refresh', async () => {
     let failing = true
-    const { rpc, calls } = rpcFace(endpoint => {
-      if (endpoint === ACTIVITY_ENDPOINT) return failing
-        ? { ok: false, error: { code: 'internal', message: 'CursorAgent activity history is unavailable' } }
-        : history([ready(1), start(2, 't1', owned)])
-      return page([], 0, false)
+    const { rpc, calls } = rpcFace((endpoint, payload) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      if (failing) return { ok: false, error: { code: 'internal', message: 'CursorAgent activity history is unavailable' } }
+      return pageFrom([ready(1), start(2, 't1', owned)], afterSeqOf(payload))
     })
     const store = getNativeHistoryStore(rpc, SESSION)
     store.subscribe(() => undefined)
@@ -199,11 +271,12 @@ describe('native history subscription', () => {
     await settle()
     expect(store.getSnapshot().error).toBeUndefined()
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(2)
   })
 
-  it('resets the cursor on unsubscribe so a remount bootstraps again', async () => {
-    const { rpc, calls } = rpcFace(endpoint => endpoint === ACTIVITY_ENDPOINT ? history([ready(1), start(2, 't1', owned)]) : page([], 2, false))
+  it('resets the Activity sequence cursor on unsubscribe so a remount pages from 0', async () => {
+    const { rpc, calls } = pagingFace([ready(1), start(2, 't1', owned)])
     const store = getNativeHistoryStore(rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)
     await settle()
@@ -213,11 +286,14 @@ describe('native history subscription', () => {
     store.subscribe(() => undefined)
     await settle()
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
-    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(2)
-    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(0)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).map(call => call.payload)).toEqual([
+      { sessionId: SESSION, afterSeq: 0 },
+      { sessionId: SESSION, afterSeq: 0 },
+    ])
   })
 
-  it('drops a bootstrap superseded by unsubscribe so a remount starts clean', async () => {
+  it('drops a page superseded by unsubscribe so a remount starts clean', async () => {
     const calls: string[] = []
     let release: (() => void) | undefined
     const held = new Promise<void>(resolve => { release = resolve })
@@ -225,7 +301,7 @@ describe('native history subscription', () => {
       call: async (_channel, endpoint) => {
         calls.push(endpoint)
         if (calls.length === 1) await held
-        return history([ready(1), start(2, 't1', owned)])
+        return page([ready(1), start(2, 't1', owned)], 2, false)
       },
     }
     const store = getNativeHistoryStore(rpc, SESSION)
@@ -239,13 +315,13 @@ describe('native history subscription', () => {
 
     store.subscribe(() => undefined)
     await settle()
-    expect(calls).toEqual([ACTIVITY_ENDPOINT, ACTIVITY_ENDPOINT])
+    expect(calls).toEqual([ACTIVITY_READ_AFTER_ENDPOINT, ACTIVITY_READ_AFTER_ENDPOINT])
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
   })
 
-  it('gives a reconnecting connection its own bootstrap', async () => {
-    const first = rpcFace(() => history([ready(1), start(2, 't1', owned)]))
-    const second = rpcFace(() => history([ready(1), start(2, 't1', owned), update(3, 't1', 'completed')]))
+  it('gives a reconnecting connection its own pages from Activity sequence cursor 0', async () => {
+    const first = pagingFace([ready(1), start(2, 't1', owned)])
+    const second = pagingFace([ready(1), start(2, 't1', owned), update(3, 't1', 'completed', owned)])
     const store = getNativeHistoryStore(first.rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)
     await settle()
@@ -255,9 +331,10 @@ describe('native history subscription', () => {
     reconnected.subscribe(() => undefined)
     await settle()
     expect(reconnected.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
-    expect(second.calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(1)
-    expect(first.calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(1)
-    expect(first.calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(0)
+    expect(second.calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(first.calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
+    expect(second.calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(1)
+    expect(first.calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(1)
   })
 })
 
