@@ -23,7 +23,7 @@ import { createCursorAgentInteractionHandler, registerCursorAgentModeSwitch } fr
 import { cursorNativeModeOf, normalizeCursorAgentSessionUpdate } from './mapping.js'
 import type { AcpConnection } from './protocol.js'
 import { selectCursorAcpModel } from './model-config.js'
-import { standaloneTransportDump } from './transport-dump.js'
+import { standaloneTransportDump, transportDump, visibleAssistantText } from './transport-dump.js'
 import { CURSOR_AGENT_PERMISSION_MODES, isCursorPlanApproval, type CursorAgentClientFilesystem, type CursorAgentProviderConfig } from './types.js'
 
 /** One provider-native session with turn-scoped host callbacks. */
@@ -48,6 +48,7 @@ export class CursorAgentSession implements ExternalAgentSession {
     this.active = true
     let text = ''
     let textBytes = 0
+    let publishedVisible = ''
     let protocolFailure: Error | undefined
     let providerFailure: string | undefined
     let publishFailure: Error | undefined
@@ -73,13 +74,20 @@ export class CursorAgentSession implements ExternalAgentSession {
         if (!isRecord(params) || params.sessionId !== this.nativeId) throw new Error('CursorAgent session update belongs to another session')
         const event = normalizeCursorAgentSessionUpdate(params.update, bounds)
         if (event === null) return
+        let published = event
         if (event.type === 'assistant-delta') {
           const delta = truncateUtf8(event.text, maxTextBytes - textBytes)
           text += delta
           textBytes += utf8Length(delta)
+          const visibleNow = visibleAssistantText(text)
+          if (!visibleNow.startsWith(publishedVisible)) return
+          const publishable = visibleNow.slice(publishedVisible.length)
+          if (publishable.length === 0) return
+          publishedVisible = visibleNow
+          published = { ...event, text: publishable }
         }
         if (event.type === 'turn-result' && event.status === 'failed') providerFailure = event.content ?? 'CursorAgent turn failed'
-        events = events.then(() => boundedHost.publish(event)).then(undefined, (error: unknown) => {
+        events = events.then(() => boundedHost.publish(published)).then(undefined, (error: unknown) => {
           // Tolerate only publishes refused after this turn aborted; record anything else for the drain while keeping the chain observed on all exits.
           if (request.signal.aborted && isTurnAbortedError(error)) return
           publishFailure ??= error instanceof Error ? error : new Error('CursorAgent host publish failed')
@@ -108,11 +116,18 @@ export class CursorAgentSession implements ExternalAgentSession {
       const stopReason = isRecord(response) ? response.stopReason : undefined
       const cancelled = request.signal.aborted || stopReason === 'cancelled'
       const structured = providerFailure ?? responseFailure(response)
-      const dump = cancelled || structured !== undefined || stopReason === 'error' || stopReason === 'refusal' ? undefined : standaloneTransportDump(text)
+      const skipDump = cancelled || structured !== undefined || stopReason === 'error' || stopReason === 'refusal'
+      const trailing = skipDump ? undefined : transportDump(text)
+      const dump = trailing !== undefined && trailing.body === '' ? trailing.dump : undefined
+      const assistantText = skipDump || dump !== undefined ? text : trailing?.body ?? text
+      if (!skipDump && trailing === undefined && assistantText !== publishedVisible) {
+        const suffix = assistantText.startsWith(publishedVisible) ? assistantText.slice(publishedVisible.length) : assistantText
+        if (suffix.length > 0) await boundedHost.publish({ type: 'assistant-delta', text: suffix })
+      }
       const failure = structured ?? dump
       const status = cancelled ? 'cancelled' : failure !== undefined || stopReason === 'refusal' || stopReason === 'error' ? 'failed' : 'completed'
-      await boundedHost.publish({ type: 'turn-result', status, content: text })
-      return { status, text, nativeSessionId: this.nativeSession, ...(this.ref.resumeCursor === undefined ? {} : { resumeCursor: this.ref.resumeCursor }), ...(status === 'failed' ? { error: redactCursorAgentText(failedTurnError(failure, dump, text, stopReason)) } : {}) }
+      await boundedHost.publish({ type: 'turn-result', status, content: assistantText })
+      return { status, text: assistantText, nativeSessionId: this.nativeSession, ...(this.ref.resumeCursor === undefined ? {} : { resumeCursor: this.ref.resumeCursor }), ...(status === 'failed' ? { error: redactCursorAgentText(failedTurnError(failure, dump, assistantText, stopReason)) } : {}) }
     } catch (error) {
       if (request.signal.aborted || isAbortError(error)) return { status: 'cancelled', text, nativeSessionId: this.nativeSession }
       return { status: 'failed', text, nativeSessionId: this.nativeSession, error: redactCursorAgentText(errorMessage(error)) }

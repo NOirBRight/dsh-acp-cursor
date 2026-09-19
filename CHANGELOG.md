@@ -1,7 +1,9 @@
 ## Unreleased
 
+- Strip a trailing HTTP/2 `CANCEL` / `RetriableError` dump after a real answer so the leak is not stored as the reply.
 - Forward user image attachments into Cursor ACP `session/prompt` as `image` blocks. Path images are read as bytes instead of `resource_link`, so vision models actually see the picture.
 - Skip native Cursor turns that have neither user text nor an image, so plugin-only title prompts cannot occupy the ACP session.
+- Page native activity history so long sidecars cannot freeze Chat.
 
 ## v0.1.20
 
