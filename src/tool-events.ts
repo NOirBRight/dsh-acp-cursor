@@ -9,7 +9,10 @@ export const CURSOR_AGENT_REQUEST_TELEMETRY = 'cursor-agent/request-telemetry' a
 /** Raw pre-difference SDK usage evidence for one native prompt. */
 export const CURSOR_AGENT_USAGE_SNAPSHOTS = 'cursor-agent/usage-snapshots' as const
 
-const MAX_TOOL_TEXT = 4000
+/** Fixed ceiling on one stored tool input, output, or error string.
+ * Per-record, so a merged tool row cannot grow past one truncated payload; the
+ * activity coalescer's per-session byte ceiling sits above it. */
+export const CURSOR_AGENT_MAX_TOOL_TEXT_CHARS = 4000
 
 export const CURSOR_AGENT_SESSION_READY = 'cursor-agent/session-ready' as const
 export const CURSOR_AGENT_TOOL_START = 'cursor-agent/tool-start' as const
@@ -308,5 +311,5 @@ function stringAt(value: Record<string, unknown> | undefined, key: string): stri
 }
 
 function truncate(text: string): string {
-  return text.slice(0, MAX_TOOL_TEXT)
+  return text.slice(0, CURSOR_AGENT_MAX_TOOL_TEXT_CHARS)
 }

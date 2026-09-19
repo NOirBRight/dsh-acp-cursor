@@ -23,3 +23,11 @@ _Avoid_: recovery turn, continuation prompt (those invent a second user instruct
 **Resume cursor**:
 The opaque native session identifier persisted on the DSH session so a later ACP process can `session/load` the same Cursor conversation.
 _Avoid_: session id (ambiguous between DSH and Cursor)
+
+**Activity sequence cursor**:
+The exclusive numeric `seq` position used only to page a CursorAgent activity JSONL history. It is not a Resume cursor and never identifies a native session; `afterSeq` requests records after it and `nextCursor` advances it.
+_Avoid_: Resume cursor for this JSONL position; session id for this number
+
+**Activity stale cursor**:
+A requested Activity sequence cursor that cannot be continued because the history is ahead of it, deleted, or otherwise requires a bounded full-history resynchronization.
+_Avoid_: stale Resume cursor (the native session binding remains unchanged)

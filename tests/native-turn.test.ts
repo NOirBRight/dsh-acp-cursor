@@ -13,19 +13,19 @@ function stepStart(seq: number, turn: number, step: number) {
 const event = (type: string, seq: number, data: Record<string, unknown>) => ({ type, seq, time: seq, data })
 
 function startTurn(seq = 5): { type: string; seq: number; time: number; data: { turn: number } } {
-  const start = event('turn/start', seq, { turn: 1 })
-  nativeTurnDefinition.start({} as never, { event: start } as never)
+  const start = turnStart(seq, 1)
+  nativeTurnDefinition.start({} as never, { event: start } as never, {} as never)
   return start
 }
 
 function nodeFrom(matches: readonly { event: unknown }[]) {
-  return nativeTurnDefinition.buildViewNode({
+  return nativeTurnDefinition.buildViewNode?.({
     key: 'k',
     id: '1',
     state: { turn: 1, startMs: 0, endMs: null },
     start: { event: matches[0]?.event, location: { kind: 'unresolved' } },
     matches,
-  } as never)
+  } as never) ?? null
 }
 
 describe('CursorAgent native turn definition', () => {
@@ -83,6 +83,8 @@ describe('native turn mix-in with /ask-matt context injections', () => {
       .filter(item => nativeTurnDefinition.match(item as never) !== null)
       .map(item => ({ event: item }))
     const node = nodeFrom(matched)
-    expect(node?.anchorSeq).toBeGreaterThan(12)
+    expect(node).not.toBeNull()
+    if (node === null || !('anchorSeq' in node) || typeof node.anchorSeq !== 'number') throw new Error('native turn view did not expose an anchor sequence')
+    expect(node.anchorSeq).toBeGreaterThan(12)
   })
 })

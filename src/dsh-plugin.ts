@@ -8,6 +8,8 @@ import { CURSOR_AGENT_FULL_ACCESS_AUTHORIZED, nativeSessionBinding } from './act
 import { CursorAgentActivityStore, type CursorAgentActivityEvent } from './activity-store.js'
 import type { AcpCursorAgentSettingsConfig, AcpSettingsRow, AcpSettingsSnapshot } from './client-contract.js'
 import { deriveCursorAgentHarnessPath, validateCursorAgentInstallation } from './installation.js'
+import { CursorAgentActivityCoalescer } from './activity-coalescer.js'
+import { CursorAgentActivityMetrics } from './activity-metrics.js'
 
 import { applyCatalogOverlay, pickerGroupsFromCursorCatalog } from './catalog.js'
 import { createCursorAgentLlmBridge } from './llm-bridge.js'
@@ -19,6 +21,50 @@ import { registerAcpSettingsRpc } from './rpc.js'
 import { dshHome, loadPersistedConfig, loadPersistedModels, savePersistedConfig, savePersistedModels } from './store.js'
 import type { CursorAgentAuthorizationRequest } from './types.js'
 import { CURSOR_AGENT_SESSION_READY, type CursorAgentToolEvent } from './tool-events.js'
+
+/**
+ * One coalescing activity writer for a history root.
+ *
+ * Every durable CursorAgent activity append funnels through this object, so the
+ * coalescer's ordering barriers hold across the binding, audit and tool
+ * writers. `flush` is the turn-settlement and disposal seam; it throws the
+ * original persistence error, which the bridge turns into a failed turn.
+ * @param rootDirectory - Explicit history root.
+ * @returns The store plus the coalescing append/flush/release seam and its value-free counters.
+ */
+export function createCursorAgentActivityWriter(rootDirectory: string): {
+  readonly store: CursorAgentActivityStore
+  readonly metrics: CursorAgentActivityMetrics
+  append(sessionId: string | undefined, events: readonly CursorAgentActivityEvent[]): void
+  flush(sessionId: string): void
+  flushAll(): void
+  release(sessionId: string): void
+  pendingCount(sessionId: string): number
+} {
+  const metrics = new CursorAgentActivityMetrics()
+  const store = new CursorAgentActivityStore(rootDirectory, metrics)
+  const coalescer = new CursorAgentActivityCoalescer({
+    append: (sessionId, events) => {
+      try {
+        store.append(sessionId, events)
+      } catch {
+        throw new Error('Unable to persist CursorAgent activity; native execution stopped.')
+      }
+    },
+  }, undefined, metrics)
+  return {
+    store,
+    metrics,
+    append: (sessionId, events) => {
+      if (sessionId === undefined) throw new Error('Native activity requires an explicit DSH session id')
+      coalescer.append(sessionId, events)
+    },
+    flush: (sessionId: string) => { coalescer.flush(sessionId) },
+    flushAll: () => { coalescer.flushAll() },
+    release: (sessionId: string) => { coalescer.release(sessionId) },
+    pendingCount: (sessionId: string) => coalescer.pendingCount(sessionId),
+  }
+}
 
 /** Loader-supplied Settings values. Empty paths stay on the page until the user locates them. */
 export interface DshPluginConfig {
@@ -148,20 +194,13 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
     if (runtime !== undefined) scope.effect(() => runtime.adapters.register({ provider: 'cursor-agent', role: 'agent' }))
   })
   const home = dshHome()
-  const activity = new CursorAgentActivityStore(join(home, 'plugin-data', 'cursor-agent', 'history'))
+  const activity = createCursorAgentActivityWriter(join(home, 'plugin-data', 'cursor-agent', 'history'))
   const { installActivityBindingGuard } = await import('./activity-binding.js')
-  installActivityBindingGuard(ctx, activity, sessionId => {
+  installActivityBindingGuard(ctx, activity.store, sessionId => {
     const agent = agentFor(ctx, sessionId) as { session?: { snapshotEvents?: () => readonly { readonly type: string; readonly data?: unknown }[] } } | undefined
     return agent?.session?.snapshotEvents?.()
   })
-  const appendActivity = (sessionId: string | undefined, events: readonly CursorAgentActivityEvent[]): void => {
-    if (sessionId === undefined) throw new Error('Native activity requires an explicit DSH session id')
-    try {
-      activity.append(sessionId, events)
-    } catch {
-      throw new Error('Unable to persist CursorAgent activity; native execution stopped.')
-    }
-  }
+  const appendActivity = activity.append
   let live = resolvePluginConfig(config, loadPersistedConfig(home))
   let authorizationUrl: string | undefined
   let probeMessage: string | undefined
@@ -277,8 +316,11 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
           return service.ask({ ...rest, ...(agent === undefined ? {} : { agent }) })
         },
         appendSessionReady: (sessionId, ref) => { appendActivity(sessionId, [{ type: CURSOR_AGENT_SESSION_READY, data: { provider: 'cursor-agent', ref } }]) },
-        loadSession: id => nativeSessionBinding(activity.read(id), id),
+        loadSession: id => nativeSessionBinding(activity.store.read(id), id),
         appendToolEvents: (sessionId, events: readonly CursorAgentToolEvent[]) => { appendActivity(sessionId, events) },
+        flushActivity: sessionId => { activity.flush(sessionId) },
+        flushActivityAll: () => { activity.flushAll() },
+        releaseActivity: sessionId => { activity.release(sessionId) },
         isPlanMode: sessionId => {
           const agent = agentFor(ctx, sessionId) as { session: unknown } | undefined
           const projections = ctx.get?.('sessionProjections') as { stateOf(session: unknown, key: 'plan'): { active: boolean } | undefined } | undefined
@@ -323,11 +365,22 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
       })
     })
   }
-  ctx.on('session/disposed', session => bridge?.release(session.id))
+  ctx.on('session/disposed', async session => {
+    // Disposal is the last durable seam: flush and drop this session's buffer
+    // first, then release the native session. A flush failure is reported but
+    // cannot fail a turn that is already gone.
+    try {
+      activity.release(session.id)
+    } catch (error) {
+      console.error('dsh-acp-cursor: activity flush during session disposal failed', error)
+    }
+    await bridge?.release(session.id)
+  })
   const registerSettings = (scope: { effect: (fn: () => unknown, name?: string) => unknown; connection: DshPluginContext['connection'] }): void => { registerAcpSettingsRpc(scope, {
     snapshot,
     quota: async (signal) => quotaReader.snapshot(signal),
-    readActivity: sessionId => activity.read(sessionId),
+    readActivity: sessionId => activity.store.read(sessionId),
+    readActivityAfter: (sessionId, afterSeq) => activity.store.readActivityPage(sessionId, afterSeq),
     catalog: async () => {
       if (installed === undefined) return { groups: [] }
       if ('status' in await validateCursorAgentInstallation(toProviderConfig(live))) return { groups: [] }
@@ -430,6 +483,11 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
   ctx.effect(() => async () => {
     changing = true
     quotaReader.invalidate()
+    try {
+      activity.flushAll()
+    } catch (error) {
+      console.error('dsh-acp-cursor: activity flush during teardown failed', error)
+    }
     await bridge?.dispose()
     await installed?.dispose()
   }, 'dsh-acp-cursor: provider')

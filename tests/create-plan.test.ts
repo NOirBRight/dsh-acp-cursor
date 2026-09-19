@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import { ExternalAgentProviderRegistry, providerId, providerInstanceId, sessionId, turnId, type ExternalAgentTurnHost } from '@deepseek-ai/dsh-acp-provider'
+import { ExternalAgentProviderRegistry, optionId, providerId, providerInstanceId, sessionId, turnId, type ExternalAgentTurnHost } from '@deepseek-ai/dsh-acp-provider'
 import type { AcpRequestHandler } from '../src/protocol.js'
 import { createCursorAgentInteractionHandler } from '../src/interaction.js'
 import { createCursorAgentLlmBridge } from '../src/llm-bridge.js'
@@ -180,9 +180,9 @@ it('follows an approved plan with an agent-mode turn', async () => {
       supportedModes: [...VALID_MODES],
       dispose: async () => undefined,
       runTurn: async (request: { prompt: string; nativeMode?: string }, host: ExternalAgentTurnHost) => {
-        turns.push({ prompt: request.prompt, nativeMode: request.nativeMode })
+        turns.push({ prompt: request.prompt, ...(request.nativeMode === undefined ? {} : { nativeMode: request.nativeMode }) })
         if (turns.length === 1) {
-          await host.requestUserInput({ requestId: 'plan-review', question: '# Plan', options: ['Approve', 'Keep planning'] })
+          await host.requestUserInput({ requestId: optionId('plan-review'), question: '# Plan', options: [optionId('Approve'), optionId('Keep planning')] })
         }
         return { status: 'completed' as const, text: 'ok' }
       },
@@ -225,9 +225,9 @@ it('applies a picker change made during plan review to the following native turn
       supportedModes: [...VALID_MODES],
       dispose: async () => undefined,
       runTurn: async (request: { prompt: string; model?: string }, host: ExternalAgentTurnHost) => {
-        turns.push({ prompt: request.prompt, model: request.model === undefined ? undefined : String(request.model) })
+        turns.push({ prompt: request.prompt, ...(request.model === undefined ? {} : { model: String(request.model) }) })
         if (turns.length === 1) {
-          await host.requestUserInput({ requestId: 'plan-review', question: '# Plan', options: ['Approve', 'Keep planning'] })
+          await host.requestUserInput({ requestId: optionId('plan-review'), question: '# Plan', options: [optionId('Approve'), optionId('Keep planning')] })
         }
         return { status: 'completed' as const, text: 'ok' }
       },
@@ -327,7 +327,7 @@ it('does not keep the stream-start model when a later picker selection is not in
       supportedModes: [...VALID_MODES],
       dispose: async () => undefined,
       runTurn: async (_request: { prompt: string }, host: ExternalAgentTurnHost) => {
-        await host.requestUserInput({ requestId: 'plan-review', question: '# Plan', options: ['Approve', 'Keep planning'] })
+        await host.requestUserInput({ requestId: optionId('plan-review'), question: '# Plan', options: [optionId('Approve'), optionId('Keep planning')] })
         return { status: 'completed' as const, text: 'ok' }
       },
     }),
