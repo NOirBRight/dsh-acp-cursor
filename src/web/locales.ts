@@ -51,13 +51,10 @@ export const en = {
   activityRetry: 'Retry',
   activityNoOutput: 'No displayable output.',
   activityThink: 'Think',
-  activityInput: 'Input',
-  activityOutput: 'Output',
   jsonTruncated: '{total} characters',
   markdownCopy: 'Copy',
   markdownCopied: 'Copied',
   markdownFootnotes: 'Footnotes',
-  activityDownload: 'Download',
 }
 export type AcpSettingsKey = keyof typeof en
 export const zh: Record<AcpSettingsKey, string> = {
@@ -112,11 +109,8 @@ export const zh: Record<AcpSettingsKey, string> = {
   activityRetry: '重试',
   activityNoOutput: '无可显示的输出。',
   activityThink: '思考',
-  activityInput: '输入',
-  activityOutput: '输出',
   jsonTruncated: '{total} 个字符',
   markdownCopy: '复制',
   markdownCopied: '已复制',
   markdownFootnotes: '脚注',
-  activityDownload: '下载',
 }

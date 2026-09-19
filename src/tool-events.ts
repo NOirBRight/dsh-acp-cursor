@@ -313,5 +313,20 @@ function stringAt(value: Record<string, unknown> | undefined, key: string): stri
 }
 
 function truncate(text: string): string {
-  return text.slice(0, CURSOR_AGENT_MAX_TOOL_TEXT_CHARS)
+  if (text.length <= CURSOR_AGENT_MAX_TOOL_TEXT_CHARS) return text
+  const marker = '\n… [truncated]'
+  try {
+    const value: unknown = JSON.parse(text)
+    // ponytail: bounded preview, not full file history; spill payloads if full diffs are needed.
+    for (let limit = 2000; limit >= 64; limit = Math.floor(limit / 2)) {
+      const bounded = JSON.stringify(value, (key, part: unknown) =>
+        typeof part === 'string' && part.length > limit && !['path', 'file_path', 'type', 'status'].includes(key)
+          ? part.slice(0, limit) + marker : part)
+      if (bounded.length <= CURSOR_AGENT_MAX_TOOL_TEXT_CHARS) return bounded
+    }
+    // Many short fields cannot shrink in place. Keep valid JSON without pretending it is a file/diff.
+    // Reserve wrapper space and the worst-case six characters per JSON-escaped code unit.
+    return JSON.stringify({ truncatedPreview: text.slice(0, Math.floor((CURSOR_AGENT_MAX_TOOL_TEXT_CHARS - 64) / 6)) + marker })
+  } catch { /* Raw text and legacy truncated JSON remain readable. */ }
+  return text.slice(0, CURSOR_AGENT_MAX_TOOL_TEXT_CHARS - marker.length) + marker
 }
