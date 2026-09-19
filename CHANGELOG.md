@@ -1,3 +1,7 @@
+## v0.1.20
+
+- Read the live Cursor model selection from the modelSelection projection instead of the Agent's default route; a session created on another provider no longer fails every native turn as `Cursor model is not enabled`.
+
 ## v0.1.19
 
 - Keep native SSE alive after every context injection and complete Cursor plan review, including `create_plan` / `ask_question` approval flows.
