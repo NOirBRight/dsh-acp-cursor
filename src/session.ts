@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import {
   sessionId,
   truncateUtf8,
@@ -144,14 +145,40 @@ async function promptBlocks(prompt: string, attachments: readonly ExternalAgentA
     if (attachment.path !== undefined) {
       if (filesystem?.resolvePath === undefined) throw new Error('CursorAgent path attachments require the DSH filesystem resolver')
       const path = await filesystem.resolvePath(attachment.path, 'read')
+      if (isImageAttachment(attachment)) {
+        const mimeType = attachment.mimeType ?? mimeTypeFromName(path) ?? mimeTypeFromName(attachment.name)
+        if (mimeType === undefined) throw new Error('CursorAgent image attachment has no mime type: ' + attachment.name)
+        blocks.push({ type: 'image', data: (await readFile(path)).toString('base64'), mimeType, uri: path })
+        continue
+      }
       blocks.push({ type: 'resource_link', name: attachment.name, uri: path, ...(attachment.mimeType === undefined ? {} : { mimeType: attachment.mimeType }) })
       continue
     }
-    if (attachment.data !== undefined && attachment.mimeType?.startsWith('image/') === true) { blocks.push({ type: 'image', data: attachment.data, mimeType: attachment.mimeType }); continue }
+    if (attachment.data !== undefined && isImageAttachment(attachment)) {
+      const mimeType = attachment.mimeType ?? mimeTypeFromName(attachment.name) ?? 'image/png'
+      blocks.push({ type: 'image', data: attachment.data, mimeType })
+      continue
+    }
     if (attachment.data !== undefined) { blocks.push({ type: 'text', text: attachment.data }); continue }
     throw new Error('CursorAgent attachment has no path or data: ' + attachment.name)
   }
   return blocks
+}
+
+function isImageAttachment(attachment: ExternalAgentAttachment): boolean {
+  if (attachment.mimeType?.startsWith('image/') === true) return true
+  if (attachment.mimeType !== undefined) return false
+  return mimeTypeFromName(attachment.path ?? attachment.name) !== undefined
+}
+
+function mimeTypeFromName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const ext = value.slice(value.lastIndexOf('.')).toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  return undefined
 }
 
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength }

@@ -1,3 +1,8 @@
+## Unreleased
+
+- Forward user image attachments into Cursor ACP `session/prompt` as `image` blocks. Path images are read as bytes instead of `resource_link`, so vision models actually see the picture.
+- Skip native Cursor turns that have neither user text nor an image, so plugin-only title prompts cannot occupy the ACP session.
+
 ## v0.1.20
 
 - Read the live Cursor model selection from the modelSelection projection instead of the Agent's default route; a session created on another provider no longer fails every native turn as `Cursor model is not enabled`.
