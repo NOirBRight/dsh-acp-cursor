@@ -13,6 +13,10 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconAgentPresetOutline16: () => null,
 }))
 
+vi.mock('@deepseek-ai/dsh-acp-provider/native-ui', () => ({
+  NativeToolCard: () => <div data-native-tool-card="" />,
+}))
+
 import { NativeActivityNode } from '../src/web/NativeActivityNode.tsx'
 
 const labels = {

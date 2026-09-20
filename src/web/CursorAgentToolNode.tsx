@@ -1,17 +1,15 @@
-/* One folded native sidecar row through the plugin-owned read-only card. */
+/* One folded native sidecar row through the shared ACP read-only tool card. */
 import type { JSX } from 'react'
+import { NativeToolCard, type NativeToolTranslate } from '@deepseek-ai/dsh-acp-provider/native-ui'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { AcpSettingsKey } from './locales.js'
 import type { CursorAgentToolRowData } from './native-activity.js'
-import { CursorAgentReadonlyCard } from './CursorAgentReadonlyCard.js'
-import { nativeToolBlock, nativeToolSummary } from './native-tool-card.js'
+import { nativeToolCardModel, nativeToolDisplaySummary } from './native-tool-card.js'
 
-export function CursorAgentToolNode({ row, t, conversationT }: {
+export function CursorAgentToolNode({ row, conversationT }: {
   readonly row: CursorAgentToolRowData
-  readonly t: (key: AcpSettingsKey) => string
   readonly conversationT: TranslateNS<'conversation'>
 }): JSX.Element {
-  const parsed = Date.parse(row.firstSeenAt)
-  const { toolName, nativeName, callId, block } = nativeToolBlock(row.state, Number.isFinite(parsed) ? parsed : 0)
-  return <CursorAgentReadonlyCard callId={callId} toolName={toolName} nativeName={nativeName} summary={nativeToolSummary(row.state, toolName)} block={block} t={t} conversationT={conversationT} />
+  const translate: NativeToolTranslate = conversationT
+  const model = nativeToolCardModel(row.state)
+  return <NativeToolCard {...model} summary={nativeToolDisplaySummary(row.state, model.toolName, translate)} t={translate} />
 }

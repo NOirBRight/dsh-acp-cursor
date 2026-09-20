@@ -1,3 +1,9 @@
+## v0.1.25
+
+- Reuse Provider 0.1.6 for bounded activity coalescing, retained incremental history, valid structured previews, and accessible read-only native tool cards.
+- Keep Cursor-specific activity folding, RPC decoding, routing, permissions, and error behavior in the adapter while removing duplicate browser and coalescer implementations.
+- Bundle the shared native-history browser subpath so the published client remains self-contained.
+
 ## v0.1.24
 
 - Expand native Read, Edit/Write and Shell cards using shared DSH read, diff and terminal views; retain compact copyable IN/OUT for other payloads and errors.

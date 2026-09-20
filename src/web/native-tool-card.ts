@@ -1,49 +1,17 @@
-/** Adapt folded native sidecar rows to DSH ToolRow presentation.
- *
- * Pure browser-safe mapping from the activity/read sidecar. The block is
- * presentation only: never a durable executable DSH tool event.
- */
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
+/** Adapt folded native sidecar rows to DSH ToolRow presentation. */
+import type { NativeToolCardProps, NativeToolDetail, NativeToolTranslate } from '@deepseek-ai/dsh-acp-provider/native-ui'
 import type { CursorAgentToolState } from '../tool-events.js'
 
-/** Folded native title to canonical wire name. Prefixes, a small command regex,
- * and a command/cmd arg fill gaps Cursor leaves as "Read /path" / raw git lines.
- * Anything else stays verbatim. */
 const NATIVE_TOOL_NAMES: Record<string, string> = {
-  'run command': 'bash',
-  'view file': 'read',
-  'read file': 'read',
-  'fetch page': 'web_fetch',
-  fetch: 'web_fetch',
-  search: 'web_search',
-  grep: 'grep',
-  glob: 'glob',
-  'write file': 'write',
-  'edit file': 'edit',
-  edit: 'edit',
-  write: 'write',
-  'str replace': 'edit',
-  'str replace editor': 'edit',
-  'todo write': 'todo_write',
-  'update todos': 'todo_write',
+  'run command': 'bash', 'view file': 'read', 'read file': 'read', 'fetch page': 'web_fetch', fetch: 'web_fetch',
+  search: 'web_search', grep: 'grep', glob: 'glob', 'write file': 'write', 'edit file': 'edit', edit: 'edit', write: 'write',
+  'str replace': 'edit', 'str replace editor': 'edit', 'todo write': 'todo_write', 'update todos': 'todo_write',
 }
-
-/** Native argument aliases to canonical DSH argument keys, each verified
- * against the card models that read them: command feeds the terminal shell
- * call, file_path is what the read model requires (path alone never
- * qualifies), url feeds web_fetch and renders as summary text without result
- * metadata. Unknown keys survive verbatim. */
 const ARG_KEY_ALIASES: Record<string, string> = {
-  CommandLine: 'command',
-  commandLine: 'command',
-  command_line: 'command',
-  AbsolutePath: 'file_path',
-  URL: 'url',
-  uri: 'url',
+  CommandLine: 'command', commandLine: 'command', command_line: 'command', AbsolutePath: 'file_path', URL: 'url', uri: 'url',
 }
-
-/** Path-ish keys a location fallback must not override. */
 const PATH_KEYS = ['path', 'file_path', 'directory_path'] as const
+const SUMMARY_KEYS = ['command', 'file_path', 'path', 'pattern', 'glob', 'query', 'url', 'directory_path'] as const
 
 function foldName(name: string): string {
   return name.trim().replace(/[_-]+/gu, ' ').replace(/\s+/gu, ' ').toLowerCase()
@@ -62,19 +30,10 @@ function aliasArgs(parsed: Record<string, unknown> | undefined): Record<string, 
 export function parseRecord(raw: string): Record<string, unknown> | undefined {
   try {
     const value: unknown = JSON.parse(raw)
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : undefined
-  } catch {
-    return undefined
-  }
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+  } catch { return undefined }
 }
 
-/**
- * Map a recorded native tool name to its canonical DSH wire name.
- * Table, title prefixes, a small command regex, then command/cmd args.
- * Unknown names stay verbatim.
- */
 export function nativeToolName(name: string, input?: string): string {
   const core = name.startsWith('Running ') ? name.slice('Running '.length) : name
   const folded = foldName(core)
@@ -95,9 +54,6 @@ export function nativeToolName(name: string, input?: string): string {
   return name
 }
 
-const SUMMARY_KEYS = ['command', 'file_path', 'path', 'pattern', 'glob', 'query', 'url', 'directory_path'] as const
-
-/** One-line ToolRow summary: canonical args, then location, then the ACP title remainder. */
 export function nativeToolSummary(state: CursorAgentToolState, toolName: string): string {
   const aliased = state.input === undefined ? undefined : aliasArgs(parseRecord(state.input))
   if (aliased !== undefined) {
@@ -113,16 +69,6 @@ export function nativeToolSummary(state: CursorAgentToolState, toolName: string)
   return core
 }
 
-/**
- * Build the canonical args JSON for one folded row. Known native keys move to
- * their canonical slots; every other key survives verbatim, so unknowns keep
- * their data. A sidecar location fills a missing path/url on a structured
- * args object only: raw non-JSON input passes through untouched (the generic
- * summary and body read it verbatim), and then a location has no canonical
- * slot — the output text still carries the readable result.
- * @param state - folded native row state.
- * @returns argsRaw for the presentation block: canonical JSON or raw input.
- */
 export function nativeToolArgs(state: CursorAgentToolState): string {
   if (state.input === undefined) {
     if (state.location === undefined) return ''
@@ -133,59 +79,110 @@ export function nativeToolArgs(state: CursorAgentToolState): string {
   const args = aliasArgs(parsed) ?? {}
   const location = state.location
   if (location !== undefined) {
-    if (location.kind === 'file' && !PATH_KEYS.some(key => typeof args[key] === 'string' && args[key] !== '')) {
-      args.path = location.target
-    }
+    if (location.kind === 'file' && !PATH_KEYS.some(key => typeof args[key] === 'string' && args[key] !== '')) args.path = location.target
     if (location.kind === 'url' && typeof args.url !== 'string') args.url = location.target
   }
   return JSON.stringify(args)
 }
 
-/**
- * Build presentation props for one folded row: the normalized wire name plus a
- * running block while pending/running, or a settled block honoring the actual
- * outcome (failed settles isError, completed does not). The verbatim native
- * name is the card title attribute when the canonical label renames it.
- * No result metadata is ever synthesized, so rich cards trigger only off
- * genuine canonical arguments.
- * @param state - folded native row state.
- * @param timeMs - row wall clock for the block timestamps; defaults to 0.
- * @returns wire name, verbatim native name and tool id, and the presentation-only block.
- */
-export function nativeToolBlock(state: CursorAgentToolState, timeMs = 0): {
-  readonly toolName: string
-  readonly nativeName: string
-  readonly callId: string
-  readonly block: ToolCallBlock
-} {
+export type CursorNativeToolCardModel = Omit<NativeToolCardProps, 't'>
+
+/** Cursor TODO summaries carry provider-specific status values and stay outside the shared renderer. */
+export function nativeToolDisplaySummary(state: CursorAgentToolState, toolName: string, t: NativeToolTranslate): string {
+  if (toolName !== 'todo_write' || state.input === undefined) return nativeToolSummary(state, toolName)
+  const rawTodos = parseRecord(state.input)?.todos
+  if (!Array.isArray(rawTodos)) return nativeToolSummary(state, toolName)
+  const todos = rawTodos.map(item => {
+    const value = record(item)
+    return { content: value.content, status: String(value.status).replace(/^TODO_STATUS_/u, '').toLowerCase() }
+  })
+  if (!todos.every(item => typeof item.content === 'string' && ['pending', 'in_progress', 'completed'].includes(item.status))) return nativeToolSummary(state, toolName)
+  const done = todos.filter(item => item.status === 'completed').length
+  const active = todos.find(item => item.status === 'in_progress')
+  return t('todo.completed', { done, total: todos.length }) + (active === undefined ? '' : ' \u00b7 ' + String(active.content))
+}
+
+/** Normalize Cursor-specific payloads before crossing the shared native-tool UI seam. */
+export function nativeToolCardModel(state: CursorAgentToolState): CursorNativeToolCardModel {
   const toolName = nativeToolName(state.name, state.input)
   const argsRaw = nativeToolArgs(state)
-  const callId = state.toolId
-  if (state.status !== 'completed' && state.status !== 'failed') {
-    return {
-      toolName,
-      nativeName: state.name,
-      callId,
-      block: { callId, name: toolName, argsRaw, turn: 0, step: 0, time: timeMs, subCalls: [] },
-    }
-  }
-  const text = state.status === 'failed'
-    ? (state.error ?? state.output ?? '')
-    : (state.output ?? state.error ?? '')
+  const settled = state.status === 'completed' || state.status === 'failed'
+  const output = settled ? (state.status === 'failed' ? state.error ?? state.output ?? '' : state.output ?? state.error ?? '') : undefined
+  const rowState = state.status === 'failed' ? 'error' : state.status === 'completed' ? 'ok' : 'running'
   return {
+    callId: state.toolId,
     toolName,
     nativeName: state.name,
-    callId,
-    block: {
-      kind: 'tool-result',
-      seq: 0,
-      time: timeMs,
-      callId,
-      call: { name: toolName, argsRaw },
-      callTime: null,
-      content: text === '' ? [] : [{ type: 'text' as const, text }],
-      isError: state.status === 'failed',
-      subCalls: [],
-    },
+    summary: nativeToolSummary(state, toolName),
+    state: rowState,
+    ...(argsRaw === '' ? {} : { input: argsRaw }),
+    ...(output === undefined ? {} : { output }),
+    ...(rowState === 'error' ? {} : detailOf(toolName, argsRaw, output)),
   }
+}
+
+function detailOf(toolName: string, argsRaw: string, result: string | undefined): { readonly detail: NativeToolDetail } | Record<string, never> {
+  const input = parseRecord(argsRaw) ?? {}
+  const output = result === undefined ? undefined : parse(result)
+  const jsonStart = toolName === 'read' ? /^\s*[\[{]/u : /^\s*(?:\{|\[\s*[\[{"])/u
+  const unparsedJson = typeof output === 'string' && output === result && jsonStart.test(output)
+  const text = unparsedJson ? undefined : outputText(output)
+  if (toolName === 'read' && result === '') return { detail: { kind: 'empty' } }
+  const path = typeof input.file_path === 'string' ? input.file_path : typeof input.path === 'string' ? input.path : undefined
+  if (toolName === 'read' && path !== undefined && text !== undefined) {
+    const offset = typeof input.offset === 'number' && Number.isSafeInteger(input.offset) && input.offset > 0 ? input.offset : 1
+    const lines = (text === '' ? [] : text.replace(/\n$/u, '').split('\n')).map((line, index) => ({ number: offset + index, text: line }))
+    const total = record(output).totalLines
+    const totalLines = typeof total === 'number' && Number.isSafeInteger(total) && total >= offset + lines.length - 1 ? total : lines.length
+    return { detail: { kind: 'read', label: path, lines, totalLines } }
+  }
+  if (toolName === 'edit' || toolName === 'write') {
+    const diffs: { path: string; oldText: string | null; newText: string }[] = []
+    if (Array.isArray(output)) {
+      for (const item of output) {
+        const diff = record(item)
+        if (diff.type !== 'diff' || typeof diff.path !== 'string' || typeof diff.newText !== 'string' || !(diff.oldText === null || typeof diff.oldText === 'string')) { diffs.length = 0; break }
+        const header = `++ b/${diff.path}`
+        const created = diff.oldText === '-- /dev/null' && (diff.newText === header || diff.newText.startsWith(header + '\n'))
+        diffs.push({ path: diff.path, oldText: created ? null : diff.oldText, newText: created ? diff.newText.slice(header.length + 1) : diff.newText })
+      }
+    }
+    if (diffs.length === 0 && path !== undefined) {
+      if (toolName === 'write' && typeof input.content === 'string') diffs.push({ path, oldText: null, newText: input.content })
+      if (toolName === 'edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string') diffs.push({ path, oldText: input.old_string, newText: input.new_string })
+    }
+    if (diffs.length > 0) return { detail: { kind: 'diff', diffs } }
+  }
+  const command = input.command ?? input.cmd
+  const shell = record(output)
+  const terminalOutput = text ?? (typeof shell.stdout === 'string' || typeof shell.stderr === 'string'
+    ? [shell.stdout, shell.stderr].filter((part): part is string => typeof part === 'string').join('') : undefined)
+  if (toolName === 'bash' && typeof command === 'string' && (result === undefined || terminalOutput !== undefined)) {
+    const exitCode = shell.exitCode ?? shell.exit_code
+    return { detail: { kind: 'terminal', command, ...(terminalOutput === undefined ? {} : { output: terminalOutput }),
+      ...(typeof input.workdir === 'string' ? { cwd: input.workdir } : {}),
+      ...(typeof exitCode === 'number' && Number.isInteger(exitCode) ? { exitCode } : {}) } }
+  }
+  return {}
+}
+
+function parse(text: string): unknown {
+  try { return JSON.parse(text) } catch { return text }
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function outputText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  const object = record(value)
+  if (typeof object.content === 'string') return object.content
+  if (object.type === 'text' && typeof object.text === 'string') return object.text
+  if (object.type === 'content') return outputText(object.content)
+  if (Array.isArray(value)) {
+    const parts = value.map(outputText)
+    if (parts.every(part => part !== undefined)) return parts.join('\n')
+  }
+  return undefined
 }

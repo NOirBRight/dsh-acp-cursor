@@ -81,7 +81,7 @@ function NativeSubagentNode({ branch, ...labels }: { branch: NativeAgentBranch }
 export function NativeActivityNode({ branch, ...labels }: { branch: NativeActivityBranch } & Labels): ReactNode {
   switch (branch.kind) {
     case 'tool': return <div title={branch.row.state.name} data-native-tool-id={branch.row.state.toolId} data-native-trajectory={branch.row.state.ownership?.trajectoryId}>
-      <CursorAgentToolNode row={branch.row} t={labels.t} conversationT={labels.conversationT} />
+      <CursorAgentToolNode row={branch.row} conversationT={labels.conversationT} />
     </div>
     case 'text': return branch.thought
       ? <ThoughtRow branch={branch} {...labels} />

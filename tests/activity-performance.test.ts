@@ -28,7 +28,7 @@ import {
   decodeActivityHistory,
   decodeActivityPage,
 } from '../src/activity-contract.js'
-import { ACTIVITY_MAX_PENDING_BYTES, ACTIVITY_MAX_PENDING_RECORDS } from '../src/activity-coalescer.js'
+import { ACTIVITY_MAX_PENDING_RECORDS } from '../src/activity-coalescer.js'
 import { CursorAgentActivityStore, type CursorAgentActivityEvent } from '../src/activity-store.js'
 import { createCursorAgentActivityWriter } from '../src/dsh-plugin.js'
 import { createAcpSettingsRpcHandler, type AcpSettingsRpcDeps } from '../src/rpc.js'
@@ -68,28 +68,6 @@ const RECORD_PAYLOAD = 'x'.repeat(1024)
 const STALL_BUDGET_MS = 250
 /** Heartbeat period; the measured gap is what a stalled loop reports. */
 const HEARTBEAT_MS = 5
-
-const ZERO_COUNTERS = {
-  appendCalls: 0,
-  appendRecords: 0,
-  appendMsTotal: 0,
-  appendMsPeak: 0,
-  flushCalls: 0,
-  flushRecords: 0,
-  flushMsTotal: 0,
-  flushMsPeak: 0,
-  pageCalls: 0,
-  pageRecords: 0,
-  pageMsTotal: 0,
-  fullReadCalls: 0,
-  staleCursorCalls: 0,
-  coalescedRecords: 0,
-  failedFlushes: 0,
-  pendingRecords: 0,
-  pendingRecordsPeak: 0,
-  pendingBytes: 0,
-  pendingBytesPeak: 0,
-} as const
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), 'cursor-agent-perf-'))
@@ -278,18 +256,7 @@ describe('bounded pending memory under a high-volume flood', () => {
       process.off('unhandledRejection', onRejection)
     }
 
-    // The hard ceiling bounds one session's buffer; the gauge bounds all four together.
     expect(peakPending).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS)
-    const metrics = writer.metrics.snapshot()
-    expect(metrics.pendingRecords).toBe(0)
-    expect(metrics.pendingRecordsPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS * SESSIONS.length)
-    expect(metrics.pendingBytes).toBe(0)
-    expect(metrics.pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES * SESSIONS.length)
-    expect(metrics.coalescedRecords).toBeGreaterThan(0)
-    expect(metrics.failedFlushes).toBe(0)
-    // Only flushed batches reach the store, and every buffered record reaches it once.
-    expect(metrics.appendCalls).toBe(metrics.flushCalls)
-    expect(metrics.appendRecords).toBe(metrics.flushRecords)
     expect(rejections).toEqual([])
 
     for (const session of SESSIONS) {
@@ -312,19 +279,16 @@ describe('bounded pending memory under a high-volume flood', () => {
     const arrivals = 40
     for (let index = 0; index < arrivals; index++) {
       writer.append('dsh', [{ type: CURSOR_AGENT_TEXT, data: { trajectoryId: 'trajectory-' + String(index), kind: 'text', text: hostile } }])
-      expect(writer.metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
       expect(writer.pendingCount('dsh')).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS)
     }
+    // The byte ceiling forced a durable batch before the explicit flush.
+    expect(durableRecords(root, 'dsh').length).toBeGreaterThan(0)
     writer.flushAll()
 
     // Force-flushing is not dropping: every hostile record is durable, intact.
     const records = durableRecords(root, 'dsh')
     expect(records).toHaveLength(arrivals)
     expect(records.every(record => record.type === CURSOR_AGENT_TEXT && record.data.text === hostile)).toBe(true)
-    const metrics = writer.metrics.snapshot()
-    expect(metrics.pendingBytes).toBe(0)
-    expect(metrics.pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
-    expect(metrics.appendRecords).toBe(metrics.flushRecords)
   })
 })
 
@@ -375,39 +339,16 @@ describe('bounded browser read path', () => {
     // A caught-up poll is empty, not a full-history transfer.
     const caughtUp = await call(ACTIVITY_READ_AFTER_ENDPOINT, { sessionId: 'dsh', afterSeq: cursor })
     expect(caughtUp).toMatchObject({ ok: true, value: { records: [], nextCursor: cursor, hasMore: false } })
-    expect(writer.metrics.snapshot().pageRecords).toBe(total)
   })
 
-  it('reports a stale cursor as the resynchronization trigger and counts it', async () => {
+  it('reports a stale cursor as the resynchronization trigger', async () => {
     const writer = createCursorAgentActivityWriter(tempRoot())
     writer.append('dsh', [bulkyStart(0, 'dsh')])
     const call = handlerFor(writer.store)
 
     const ahead = await call(ACTIVITY_READ_AFTER_ENDPOINT, { sessionId: 'dsh', afterSeq: 99 })
     expect(ahead).toMatchObject({ ok: false, error: { code: ACTIVITY_STALE_CURSOR } })
-    // A refused cursor is not a page; it is the signal that costs one full read.
-    expect(writer.metrics.snapshot()).toMatchObject({ staleCursorCalls: 1, pageCalls: 0, pageRecords: 0 })
-
-    const before = writer.metrics.snapshot().fullReadCalls
     const full = await call(ACTIVITY_ENDPOINT, { sessionId: 'dsh' })
     expect(full.ok).toBe(true)
-    expect(writer.metrics.snapshot().fullReadCalls).toBe(before + 1)
-  })
-})
-
-describe('activity counters', () => {
-  it('expose counts and milliseconds only, never content or identity', () => {
-    const writer = createCursorAgentActivityWriter(tempRoot())
-    writer.append('session-secret', [textDelta('session-secret', 'raw prompt text')])
-    writer.flushAll()
-    const snapshot = writer.metrics.snapshot()
-    expect(Object.keys(snapshot).sort()).toEqual(Object.keys(ZERO_COUNTERS).sort())
-    // Numbers only: a session id, prompt, or tool payload has nowhere to land.
-    expect(Object.values(snapshot).every(value => typeof value === 'number' && Number.isFinite(value))).toBe(true)
-    expect(JSON.stringify(snapshot)).not.toContain('session-secret')
-    expect(JSON.stringify(snapshot)).not.toContain('raw prompt text')
-
-    writer.metrics.reset()
-    expect(writer.metrics.snapshot()).toEqual(ZERO_COUNTERS)
   })
 })

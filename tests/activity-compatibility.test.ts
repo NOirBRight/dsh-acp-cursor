@@ -259,13 +259,13 @@ describe('cursor reads across a stale history', () => {
 })
 
 describe('provider resolution', () => {
-  it('pins the published v0.1.5 tarball and resolves the store contract from it', async () => {
+  it('pins the coordinated v0.1.6 tarball and resolves the store contract from it', async () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { dependencies: Record<string, string> }
     expect(manifest.dependencies['@deepseek-ai/dsh-acp-provider']).toBe(
-      'https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.5/deepseek-ai-dsh-acp-provider-0.1.5.tgz',
+      'https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.6/deepseek-ai-dsh-acp-provider-0.1.6.tgz',
     )
     const installed = JSON.parse(readFileSync(new URL('../node_modules/@deepseek-ai/dsh-acp-provider/package.json', import.meta.url), 'utf8')) as { version: string }
-    expect(installed.version).toBe('0.1.5')
+    expect(installed.version).toBe('0.1.6')
 
     // The local store is the provider's store, so the O(1) cursor contract follows the pin.
     const provider = await import('@deepseek-ai/dsh-acp-provider/activity-store')

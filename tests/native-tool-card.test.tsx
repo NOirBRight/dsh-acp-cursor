@@ -1,19 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 
-vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
-  DisclosureRow: (props: { title: string; collapsedContent?: unknown; children?: unknown }) => <div data-disclosure-row="">{props.title}{props.collapsedContent}{props.children}</div>,
-  ReadBlock: (props: unknown) => <div data-read-block="">{JSON.stringify(props)}</div>,
-  DiffBlock: (props: unknown) => <div data-diff-block="">{JSON.stringify(props)}</div>,
-  TerminalBlock: (props: unknown) => <div data-terminal-block="">{JSON.stringify(props)}</div>,
-  writeClipboard: async () => true,
-  IconApiOutline14: () => null,
-  IconBrowseOutline16: () => null,
-  IconEditOutline16: () => null,
-  IconGlobeOutline14: () => null,
-  IconSearchOutline16: () => null,
-  IconSparkle16: () => null,
-  IconChecklistOutline14: () => null,
+vi.mock('@deepseek-ai/dsh-acp-provider/native-ui', () => ({
+  NativeToolCard: (props: { callId: string; toolName: string; detail?: { kind: string }; state: string }) =>
+    <pre data-native-tool-card={props.callId} data-state={props.state} data-tool-name={props.toolName} data-detail={props.detail?.kind ?? 'generic'}>{JSON.stringify(props)}</pre>,
 }))
 
 import { CursorAgentToolNode } from '../src/web/CursorAgentToolNode.tsx'
@@ -21,8 +12,7 @@ import { nativeToolName, nativeToolSummary } from '../src/web/native-tool-card.t
 import { nativeTurnDefinition } from '../src/web/native-turn.ts'
 import { toDurableToolEvents, CURSOR_AGENT_TOOL_UPDATE, CURSOR_AGENT_MAX_TOOL_TEXT_CHARS } from '../src/tool-events.ts'
 
-const t = (key: string) => key
-const conversationT = (key: string) => key.split('.').pop() ?? key
+const conversationT: TranslateNS<'conversation'> = key => key.split('.').pop() ?? key
 
 describe('nativeToolName', () => {
   it('maps ACP titles onto DSH wire names', () => {
@@ -41,55 +31,50 @@ describe('nativeToolName', () => {
   })
 })
 
-it('renders DSH disclosure chrome instead of a custom details card', () => {
-  const html = renderToStaticMarkup(<CursorAgentToolNode t={t} conversationT={conversationT as never} row={{
+it('passes a normalized model to the shared card', () => {
+  const html = renderToStaticMarkup(<CursorAgentToolNode conversationT={conversationT} row={{
     key: '1', epoch: 1, firstSeenAt: '', time: '',
     state: { toolId: '1', name: 'Read /tmp/a', status: 'completed', input: JSON.stringify({ file_path: '/tmp/a' }), output: 'ok' },
   }} />)
-  expect(html).toContain('data-disclosure-row')
-  expect(html).not.toContain('<details')
-  expect(html).toContain('>read<')
+  expect(html).toContain('data-tool-name="read"')
+  expect(html).toContain('data-detail="read"')
   expect(html).toContain('/tmp/a')
-  expect(html).toContain('data-read-block')
-  expect(html).not.toContain('data-native-download')
 })
 
 it('classifies expanded native payloads rather than showing two JSON code blocks', () => {
-  const render = (name: string, input: object, output: string, status: 'completed' | 'failed' = 'completed') => renderToStaticMarkup(<CursorAgentToolNode t={t} conversationT={conversationT as never} row={{
+  const render = (name: string, input: object, output: string, status: 'completed' | 'failed' = 'completed') => renderToStaticMarkup(<CursorAgentToolNode conversationT={conversationT} row={{
     key: '1', epoch: 1, firstSeenAt: '', time: '',
     state: { toolId: '1', name, status, input: JSON.stringify(input), output },
   }} />)
   const read = render('Read', { path: '/tmp/spec.md', offset: 3 }, JSON.stringify({ content: 'first\nsecond' }))
-  expect(read).toContain('data-read-block')
+  expect(read).toContain('data-detail="read"')
   expect(read).toContain('&quot;number&quot;:3')
-  expect(read).not.toContain('\\\\n')
-  expect(render('Edit', { path: '/tmp/a', old_string: 'before', new_string: 'after' }, 'ok')).toContain('data-diff-block')
-  expect(render('Shell', { command: 'pwd' }, JSON.stringify({ stdout: '/tmp\n', exitCode: 0 }))).toContain('data-terminal-block')
+  expect(render('Edit', { path: '/tmp/a', old_string: 'before', new_string: 'after' }, 'ok')).toContain('data-detail="diff"')
+  expect(render('Shell', { command: 'pwd' }, JSON.stringify({ stdout: '/tmp\n', exitCode: 0 }))).toContain('data-detail="terminal"')
   const generic = render('todo_write', { todos: [] }, 'Updated todo list')
-  expect(generic).toContain('data-native-io')
-  expect(generic).toContain('>input<')
-  expect(generic).toContain('>output<')
-  expect(generic).not.toContain('data-native-download')
+  expect(generic).toContain('data-detail="generic"')
+  expect(generic).toContain('&quot;input&quot;')
+  expect(generic).toContain('&quot;output&quot;')
   const failed = render('Read', { path: '/tmp/a' }, 'Permission denied', 'failed')
-  expect(failed).not.toContain('data-read-block')
+  expect(failed).not.toContain('data-detail="read"')
   expect(failed).toContain('Permission denied')
   const acpText = render('Read', { path: '/tmp/a' }, JSON.stringify([{ type: 'content', content: { type: 'text', text: 'file body' } }]))
-  expect(acpText).toContain('data-read-block')
+  expect(acpText).toContain('data-detail="read"')
   expect(acpText).toContain('file body')
-  expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: 'before', newText: 'after' }]))).toContain('data-diff-block')
-  expect(render('Write', { path: '/tmp/a', content: 'new file' }, 'ok')).toContain('data-diff-block')
+  expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: 'before', newText: 'after' }]))).toContain('data-detail="diff"')
+  expect(render('Write', { path: '/tmp/a', content: 'new file' }, 'ok')).toContain('data-detail="diff"')
   const unknown = render('Read', { path: '/tmp/a' }, JSON.stringify({ unrecognized: ['do not hide'] }))
-  expect(unknown).toContain('data-native-io')
+  expect(unknown).toContain('data-detail="generic"')
   expect(unknown).toContain('do not hide')
   const mixed = render('Read', { path: '/tmp/a' }, JSON.stringify([{ type: 'text', text: 'text' }, { type: 'image', data: 'retained' }]))
-  expect(mixed).toContain('data-native-io')
+  expect(mixed).toContain('data-detail="generic"')
   expect(mixed).toContain('retained')
   expect(render('todo_write', { todos: [{ content: 'next task', status: 'in_progress' }] }, 'ok')).toContain('next task')
-  expect(render('Update TODOs: original summary', { todos: [{ content: 'current task', status: 'TODO_STATUS_IN_PROGRESS' }] }, 'ok')).toContain('data-card-summary="completed · current task"')
-  expect(render('Read', { path: '/tmp/a' }, '{"content":"cut off')).not.toContain('data-read-block')
-  expect(render('Read', { path: '/tmp/a' }, '')).toContain('data-card-empty-result')
-  expect(render('Update TODOs: native plan', { todos: [{ content: 'native task', status: 'TODO_STATUS_PENDING' }] }, '')).toContain('data-native-io')
-  expect(render('Write', { path: '/tmp/a', content: 'new file' }, '')).toContain('data-diff-block')
+  expect(render('Update TODOs: original summary', { todos: [{ content: 'current task', status: 'TODO_STATUS_IN_PROGRESS' }] }, 'ok')).toContain('completed · current task')
+  expect(render('Read', { path: '/tmp/a' }, '{"content":"cut off')).not.toContain('data-detail="read"')
+  expect(render('Read', { path: '/tmp/a' }, '')).toContain('data-detail="empty"')
+  expect(render('Update TODOs: native plan', { todos: [{ content: 'native task', status: 'TODO_STATUS_PENDING' }] }, '')).toContain('data-detail="generic"')
+  expect(render('Write', { path: '/tmp/a', content: 'new file' }, '')).toContain('data-detail="diff"')
   const created = render('Write', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: '++ b//tmp/a\nnew file' }]))
   expect(created).toContain('&quot;oldText&quot;:null')
   expect(created).toContain('&quot;newText&quot;:&quot;new file&quot;')
@@ -97,33 +82,31 @@ it('classifies expanded native payloads rather than showing two JSON code blocks
   // Literal file content must not be rewritten just because it resembles one header.
   expect(render('Edit', {}, JSON.stringify([{ type: 'diff', path: '/tmp/a', oldText: '-- /dev/null', newText: 'literal text' }]))).toContain('-- /dev/null')
   expect(render('Read', { path: '/tmp/a', offset: 5 }, JSON.stringify({ content: 'line', totalLines: 90 }))).toContain('&quot;totalLines&quot;:90')
-  expect(render('Shell', { command: 'run' }, '[INFO] real log')).toContain('data-terminal-block')
+  expect(render('Shell', { command: 'run' }, '[INFO] real log')).toContain('data-detail="terminal"')
   for (const fragment of ['{"stdout":"cut off', '[{"type":"content","content":']) {
     const shell = render('Shell', { command: 'run' }, fragment)
-    expect(shell).toContain('data-native-io')
-    expect(shell).not.toContain('data-terminal-block')
+    expect(shell).toContain('data-detail="generic"')
+    expect(shell).not.toContain('data-detail="terminal"')
   }
-  for (const [name, title] of [['grep', 'grep'], ['glob', 'glob'], ['web_search', 'webSearch'], ['web_fetch', 'webFetch']] as const) {
+  for (const name of ['grep', 'glob', 'web_search', 'web_fetch'] as const) {
     const search = render(name, { query: 'needle' }, 'matches')
-    expect(search).toContain(`>${title}<`)
-    expect(search).toContain('data-native-io')
+    expect(search).toContain(`data-tool-name="${name}"`)
+    expect(search).toContain('data-detail="generic"')
   }
-  expect(generic).not.toContain('aria-expanded') // no duplicate Inspect surface on a fallback
-  expect(generic.match(/data-native-copy/g)).toHaveLength(2)
 })
 
 it('keeps bounded recorded read and diff payloads valid JSON for the real render path', () => {
   for (const [name, output, marker] of [
-    ['Read', { content: 'file line\n'.repeat(2000) }, 'data-read-block'],
-    ['Edit', [{ type: 'diff', path: '/tmp/a', oldText: 'before\n'.repeat(2000), newText: 'after\n'.repeat(2000) }], 'data-diff-block'],
-    ['Read', Array.from({ length: 150 }, (_, i) => ({ type: 'content', content: { type: 'text', text: `short line ${i}` } })), 'data-native-io'],
+    ['Read', { content: 'file line\n'.repeat(2000) }, 'data-detail="read"'],
+    ['Edit', [{ type: 'diff', path: '/tmp/a', oldText: 'before\n'.repeat(2000), newText: 'after\n'.repeat(2000) }], 'data-detail="diff"'],
+    ['Read', Array.from({ length: 150 }, (_, i) => ({ type: 'content', content: { type: 'text', text: `short line ${i}` } })), 'data-detail="generic"'],
   ] as const) {
     const events = toDurableToolEvents({ toolId: '1', name, status: 'completed', input: JSON.stringify({ path: '/tmp/a' }), output: JSON.stringify(output) }, new Set(['1']))
     const update = events.find(event => event.type === CURSOR_AGENT_TOOL_UPDATE)!
     expect(update.data.output!.length).toBeLessThanOrEqual(CURSOR_AGENT_MAX_TOOL_TEXT_CHARS)
     expect(() => JSON.parse(update.data.output!)).not.toThrow()
     expect(update.data.output).toContain('[truncated]')
-    const html = renderToStaticMarkup(<CursorAgentToolNode t={t} conversationT={conversationT as never} row={{ key: '1', epoch: 1, firstSeenAt: '', time: '', state: { ...update.data, name } }} />)
+    const html = renderToStaticMarkup(<CursorAgentToolNode conversationT={conversationT} row={{ key: '1', epoch: 1, firstSeenAt: '', time: '', state: { ...update.data, name } }} />)
     expect(html).toContain(marker)
   }
 })

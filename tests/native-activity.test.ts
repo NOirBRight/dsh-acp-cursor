@@ -185,7 +185,7 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(store.getSnapshot().rows.map(row => [row.key, row.state.status])).toEqual([['2', 'completed']])
     expect(store.getSnapshot().error).toBeUndefined()
-    expect(store.getMetrics()).toEqual({ pageCalls: 2, pageRecords: 5, resynchronizations: 1 })
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).map(call => afterSeqOf(call.payload))).toEqual([0, 2, 0])
     expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
   })
 
@@ -205,11 +205,6 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT)).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2)
     expect(calls.filter(call => call.endpoint === ACTIVITY_ENDPOINT)).toHaveLength(0)
-    expect(store.getMetrics()).toEqual({
-      pageCalls: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2,
-      pageRecords: NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2,
-      resynchronizations: 0,
-    })
     expect(store.getSnapshot().rows).toHaveLength(NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES * 2)
   })
 
@@ -234,7 +229,7 @@ describe('native history subscription', () => {
 
   it('clears retained rows when an Activity stale cursor recovers an empty history', async () => {
     let wave = 1
-    const { rpc } = rpcFace((endpoint, payload) => {
+    const { rpc, calls } = rpcFace((endpoint, payload) => {
       if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
       const afterSeq = afterSeqOf(payload)
       if (wave === 1 && afterSeq > 0) {
@@ -251,7 +246,7 @@ describe('native history subscription', () => {
     await pollAgain()
     expect(store.getSnapshot().rows).toEqual([])
     expect(store.getSnapshot().error).toBeUndefined()
-    expect(store.getMetrics().resynchronizations).toBe(1)
+    expect(calls.filter(call => call.endpoint === ACTIVITY_READ_AFTER_ENDPOINT).map(call => afterSeqOf(call.payload))).toEqual([0, 2, 0])
   })
 
   it('surfaces a failed read and recovers on refresh', async () => {

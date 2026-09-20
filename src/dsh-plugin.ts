@@ -51,7 +51,7 @@ export function createCursorAgentActivityWriter(rootDirectory: string): {
         throw new Error('Unable to persist CursorAgent activity; native execution stopped.')
       }
     },
-  }, undefined, metrics)
+  })
   return {
     store,
     metrics,

@@ -8,7 +8,6 @@ import {
   CursorAgentActivityCoalescer,
   type ActivityCoalescerSink,
 } from '../src/activity-coalescer.js'
-import { CursorAgentActivityMetrics } from '../src/activity-metrics.js'
 import type { CursorAgentActivityEvent } from '../src/activity-store.js'
 import { CURSOR_AGENT_MAX_TOOL_TEXT_CHARS, CURSOR_AGENT_SESSION_READY, CURSOR_AGENT_TEXT, CURSOR_AGENT_TOOL_START, CURSOR_AGENT_TOOL_UPDATE, foldCursorAgentToolEvent, type CursorAgentToolState } from '../src/tool-events.js'
 
@@ -289,14 +288,13 @@ describe('CursorAgent activity coalescer', () => {
 
   it('bounds one session buffer by serialized bytes and flushes instead of dropping', () => {
     const { batches, flat, sink } = recorder()
-    const metrics = new CursorAgentActivityMetrics()
-    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const coalescer = new CursorAgentActivityCoalescer(sink)
     const delta = 'x'.repeat(4096)
     const arrivals = 128
     for (let index = 0; index < arrivals; index++) {
       coalescer.append(SESSION, [text(delta, 'text', 'trajectory-' + String(index))])
       // The ceiling holds after every arrival, including the one that crossed it.
-      expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+      expect(coalescer.pendingBytes(SESSION)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
       expect(coalescer.pendingCount(SESSION)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_RECORDS)
     }
     expect(batches.length).toBeGreaterThan(0)
@@ -304,8 +302,7 @@ describe('CursorAgent activity coalescer', () => {
     // Force-flushing is not dropping: every arrival is durable exactly once.
     expect(flat()).toHaveLength(arrivals)
     expect(flat().every(event => event.type === CURSOR_AGENT_TEXT && event.data.text === delta)).toBe(true)
-    expect(metrics.snapshot().pendingBytes).toBe(0)
-    expect(metrics.snapshot().pendingBytesPeak).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    expect(coalescer.pendingBytes(SESSION)).toBe(0)
   })
 
   it('never drops a record to fit the byte ceiling', () => {
@@ -345,8 +342,7 @@ describe('CursorAgent activity coalescer', () => {
 
   it('applies the byte ceiling per session', () => {
     const { batches, sink } = recorder()
-    const metrics = new CursorAgentActivityMetrics()
-    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const coalescer = new CursorAgentActivityCoalescer(sink)
     const filler = (session: string, index: number): CursorAgentActivityEvent => text('y'.repeat(4096), 'text', session + '-' + String(index))
     const size = Buffer.byteLength(JSON.stringify(filler('a', 0)), 'utf8')
     const perSession = Math.floor(ACTIVITY_MAX_PENDING_BYTES * 0.75 / size)
@@ -357,13 +353,12 @@ describe('CursorAgent activity coalescer', () => {
     expect(batches).toHaveLength(0)
     expect(coalescer.pendingCount('session-a')).toBe(perSession)
     expect(coalescer.pendingCount('session-b')).toBe(perSession)
-    expect(metrics.snapshot().pendingBytes).toBeGreaterThan(ACTIVITY_MAX_PENDING_BYTES)
+    expect(coalescer.pendingBytes('session-a') + coalescer.pendingBytes('session-b')).toBeGreaterThan(ACTIVITY_MAX_PENDING_BYTES)
   })
 
   it('splits a merged tool row at the byte ceiling without changing the fold', () => {
     const { flat, sink } = recorder()
-    const metrics = new CursorAgentActivityMetrics()
-    const coalescer = new CursorAgentActivityCoalescer(sink, undefined, metrics)
+    const coalescer = new CursorAgentActivityCoalescer(sink)
     const filler = (index: number): CursorAgentActivityEvent => text('y'.repeat(4000), 'text', 'trajectory-' + String(index))
     const fillerBytes = Buffer.byteLength(JSON.stringify(filler(0)), 'utf8')
     // Distinct trajectories never merge, so the count is exact and the buffer
@@ -371,7 +366,7 @@ describe('CursorAgent activity coalescer', () => {
     const fillers = Math.floor((ACTIVITY_MAX_PENDING_BYTES - 16 * 1024) / fillerBytes)
     for (let index = 0; index < fillers; index++) {
       coalescer.append(SESSION, [filler(index)])
-      expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+      expect(coalescer.pendingBytes(SESSION)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
     }
     const first: CursorAgentActivityEvent = { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running', output: 'a' } }
     // Cumulative output growth far larger than the remaining headroom: the row
@@ -381,7 +376,7 @@ describe('CursorAgent activity coalescer', () => {
     const second: CursorAgentActivityEvent = { type: CURSOR_AGENT_TOOL_UPDATE, data: { toolId: 't1', status: 'running', output: grown } }
     coalescer.append(SESSION, [first])
     coalescer.append(SESSION, [second])
-    expect(metrics.snapshot().pendingBytes).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
+    expect(coalescer.pendingBytes(SESSION)).toBeLessThanOrEqual(ACTIVITY_MAX_PENDING_BYTES)
     coalescer.flush(SESSION)
 
     const updates = flat().filter(event => event.type === CURSOR_AGENT_TOOL_UPDATE)
