@@ -88,7 +88,7 @@ export interface DshPluginContext extends ActivityBindingHostContext {
 }
 
 export const name = 'dsh-acp-cursor'
-export const inject = ['connection']
+export const inject = ['connection', 'webServer']
 
 function defaultStateDirectory(): string {
   return join(dshHome(), 'profiles', 'web', 'cursor-agent')
@@ -488,7 +488,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
       return editor.run(action, signal)
     },
   }) }
-  if (typeof ctx.inject === 'function') ctx.inject(['connection'], registerSettings)
+  if (typeof ctx.inject === 'function') ctx.inject(['connection', 'webServer'], registerSettings)
   else registerSettings(ctx)
   ctx.effect(() => async () => {
     changing = true

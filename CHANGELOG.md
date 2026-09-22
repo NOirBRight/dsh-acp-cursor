@@ -1,5 +1,9 @@
 ## v0.1.25
 
+## 0.1.26
+
+- Declare `webServer` on the Host `inject` list (and nested Connection scope) so ACP settings/snapshot RPC mounts on DSH 0.1.6+ inject enforcement.
+
 - Reuse Provider 0.1.6 for bounded activity coalescing, retained incremental history, valid structured previews, and accessible read-only native tool cards.
 - Keep Cursor-specific activity folding, RPC decoding, routing, permissions, and error behavior in the adapter while removing duplicate browser and coalescer implementations.
 - Bundle the shared native-history browser subpath so the published client remains self-contained.
