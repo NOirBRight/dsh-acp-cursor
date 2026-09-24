@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { providerId, sessionId } from '@deepseek-ai/dsh-acp-provider'
 import { ExternalAgentActivityCursorAheadError } from '@deepseek-ai/dsh-acp-provider/activity-store'
 import { describe, expect, it, vi } from 'vitest'
@@ -292,7 +293,9 @@ describe('activity read-after RPC', () => {
       run: async () => undefined,
       ...overrides,
     }
-    return createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const rpc = createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const operator = {} as HostConnectionHandle['operator']
+    return (endpoint: string, payload: unknown) => rpc(endpoint, payload, new AbortController().signal, operator)
   }
 
   it('serves a bounded page for a strict cursor request', async () => {

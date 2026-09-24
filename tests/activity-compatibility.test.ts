@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { providerId, sessionId, type ExternalAgentOwnership, type ExternalAgentSessionRef } from '@deepseek-ai/dsh-acp-provider'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { describe, expect, it } from 'vitest'
 import {
   ACTIVITY_PAGE_RECORD_LIMIT,
@@ -242,7 +243,9 @@ describe('cursor reads across a stale history', () => {
       applyConfig: async () => undefined,
       run: async () => undefined,
     }
-    const call = createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const rpc = createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const operator = {} as HostConnectionHandle['operator']
+    const call = (endpoint: string, payload: unknown) => rpc(endpoint, payload, new AbortController().signal, operator)
 
     const stale = await call('activity/read-after', { sessionId: 'dsh', afterSeq: 9999 })
     expect(stale).toMatchObject({ ok: false, error: { code: ACTIVITY_STALE_CURSOR } })

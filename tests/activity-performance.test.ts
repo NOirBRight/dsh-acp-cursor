@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { describe, expect, it, vi } from 'vitest'
 import {
   ACTIVITY_ENDPOINT,
@@ -304,7 +305,9 @@ describe('bounded browser read path', () => {
       applyConfig: async () => undefined,
       run: async () => undefined,
     }
-    return createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const rpc = createAcpSettingsRpcHandler(deps as unknown as AcpSettingsRpcDeps)
+    const operator = {} as HostConnectionHandle['operator']
+    return (endpoint: string, payload: unknown) => rpc(endpoint, payload, new AbortController().signal, operator)
   }
 
   it('transfers only records after the cursor and bounds every page', async () => {

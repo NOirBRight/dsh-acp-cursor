@@ -3,15 +3,16 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 const url = new URL(process.env.DSH_GUI_URL ?? '')
 assert(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) && url.port === '3082', 'Only lab 3082 is allowed')
-const playwrightRoot = process.env.DSH_PLAYWRIGHT_PATH ?? '/home/noirbright/.local/opt/dsh-staging/dsh-v0.1.2-rc.1-a66e470204/source/node_modules/.pnpm/playwright@1.61.1/node_modules/playwright/index.js'
+const playwrightRoot = process.env.DSH_PLAYWRIGHT_PATH
+assert(playwrightRoot, 'Set DSH_PLAYWRIGHT_PATH to an installed Playwright module path')
 const { chromium } = createRequire(playwrightRoot)('playwright')
-const browser = await chromium.launch({ headless: true, executablePath: process.env.DSH_CHROME_PATH ?? '/usr/bin/google-chrome' })
+const browser = await chromium.launch({ headless: true, executablePath: process.env.DSH_CHROME_PATH ?? '/usr/bin/chromium' })
 const firstTitle = process.env.DSH_HISTORY_TITLE ?? 'Use the bash tool to'
 const otherTitle = process.env.DSH_OTHER_TITLE ?? 'Reply with exactly the word'
 const native = '[data-cursor-agent-native-turn]'
 try {
   for (const mobile of [false, true]) {
-    const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, isMobile: mobile, hasTouch: mobile, locale: 'en-US' })
+    const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, isMobile: mobile, hasTouch: mobile, locale: 'en-US', storageState: process.env.DSH_E2E_STORAGE_STATE })
     const page = await context.newPage()
     const errors = []
     page.on('pageerror', error => errors.push(error.message))
@@ -29,10 +30,11 @@ try {
     let release
     const gate = new Promise(resolve => { release = resolve })
     let lastReadSessionId
-    await page.route('**/dsh-acp-cursor/activity/**', async route => {
+    await page.route('**/api/plugin-rpc/cursor', async route => {
       const request = route.request().postDataJSON()
-      if (!['activity/read', 'activity/read-after'].includes(request.method)) return route.continue()
-      lastReadSessionId = request.payload.sessionId
+      if (request?.method !== 'plugin-rpc/cursor'
+        || !['activity/read', 'activity/read-after'].includes(request.payload?.endpoint)) return route.continue()
+      lastReadSessionId = request.payload.payload?.sessionId
       if (hold) await gate
       await route.continue().catch(() => {}) // navigation can cancel an in-flight read
     })
@@ -43,7 +45,12 @@ try {
     }
     async function showActivity() {
       const section = page.locator(native).first()
-      if (!await section.isVisible()) await page.getByRole('button', { name: /^Thought for / }).first().click()
+      if (!await section.isVisible()) {
+        const turn = page.getByRole('button', { name: /^(?:Took |Thought for )/ }).first()
+        if (await turn.getAttribute('aria-expanded') !== 'true') await turn.click()
+        const analysis = page.getByRole('button', { name: 'Analysis completed' }).first()
+        if (await analysis.isVisible() && !await section.isVisible()) await analysis.click()
+      }
       await section.waitFor({ state: 'visible', timeout: 3000 })
     }
     try {
@@ -59,13 +66,18 @@ try {
       await openSession(otherTitle)
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) !== JSON.stringify(before), { native, before })
       hold = true
-      const resuming = page.waitForRequest(request => request.url().includes('/dsh-acp-cursor/activity/read') && request.postDataJSON()?.payload?.sessionId === sessionId, { timeout: 3000 })
+      const resuming = page.waitForRequest(request => {
+        if (new URL(request.url()).pathname !== '/api/plugin-rpc/cursor') return false
+        const body = request.postDataJSON()
+        return body?.method === 'plugin-rpc/cursor' && body.payload?.endpoint === 'activity/read-after'
+          && body.payload?.payload?.sessionId === sessionId
+      }, { timeout: 3000 })
       await openSession(firstTitle)
       // Host reads are held: this can succeed only with the retained browser history.
       await page.waitForFunction(({ native, before }) => JSON.stringify([...document.querySelectorAll(native)].map(n => n.textContent)) === JSON.stringify(before), { native, before }, { timeout: 3000 })
       await showActivity()
       const resumed = (await resuming).postDataJSON()
-      assert(resumed.method === 'activity/read-after' && resumed.payload.afterSeq > 0, 'Returning must not reread from zero')
+      assert(resumed.payload.endpoint === 'activity/read-after' && resumed.payload.payload.afterSeq > 0, 'Returning must not reread from zero')
       release()
       hold = false
       await page.waitForTimeout(1200)

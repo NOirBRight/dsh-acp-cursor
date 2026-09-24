@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmError, isAgentLoopRequest, markAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -40,9 +41,9 @@ function loopRequest(
 
 function assistantTurn(): GenerateOptions['messages'] {
   return [
-    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } },
-    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'hello' }], source: { kind: 'model', provider: 'deepseek', model: 'chat' } },
-    { id: 'u2', role: 'user', content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } },
+    { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } },
+    { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'hello' }], source: { kind: 'model', provider: 'deepseek', model: 'chat' } },
+    { id: MessageId('u2'), role: 'user', content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } },
   ] as GenerateOptions['messages']
 }
 
@@ -58,7 +59,7 @@ function requestHeader(provider: string, reason: 'initial' | 'change' = 'initial
 
 function userOnly(): GenerateOptions['messages'] {
   return [
-    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } as GenerateOptions['messages'][number],
+    { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } as GenerateOptions['messages'][number],
   ]
 }
 

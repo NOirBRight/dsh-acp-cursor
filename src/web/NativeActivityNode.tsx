@@ -1,6 +1,6 @@
 /** Display native child trajectories using the shared DSH disclosure chrome. */
 import React, { useState, type ReactNode } from 'react'
-import { DisclosureRow, IconAgentPresetOutline16, IconSparkle16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DisclosureRow, IconAgentPresetOutlineRegular, IconSparkleRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AcpSettingsKey } from './locales.js'
 import { activityBranchRunning, type NativeActivityBranch, type NativeAgentBranch } from './native-tree.js'
@@ -36,7 +36,7 @@ function ThoughtRow({ branch, ...labels }: { branch: Extract<NativeActivityBranc
   const summary = branch.text.trim().split(String.fromCharCode(10))[0] ?? ''
   return <div data-native-agent-text={branch.key} data-native-thought="">
     <DisclosureRow
-      icon={<IconSparkle16 size={14} />}
+      icon={<IconSparkleRegular size={14} />}
       title={labels.t('activityThink')}
       open={open}
       expandable={branch.text.length > 0}
@@ -60,7 +60,7 @@ function NativeSubagentNode({ branch, ...labels }: { branch: NativeAgentBranch }
       : labels.t('activityTools').replace('{count}', String(branch.toolCount))
   return <section data-native-subagent={branch.key} data-native-trajectory={branch.trajectoryId} data-native-subagent-panel="" data-state={running ? 'running' : undefined}>
     <style>{SWEEP}</style>
-    <DisclosureRow icon={<IconAgentPresetOutline16 size={14} />}
+    <DisclosureRow icon={<IconAgentPresetOutlineRegular size={14} />}
       title={`${labels.t('activitySubagent')} ${shortId}`}
       open={open} expandable expandOnRowClick keepContentWhenOpen onToggle={() => { setOpen(value => !value) }}
       collapsedContent={<span style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)', lineHeight: 'calc(24px + var(--dsh-content-font-delta, 0px))' }}>{` · ${status}`}</span>}>
