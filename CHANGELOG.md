@@ -2,6 +2,7 @@
 
 - Target official DSH `0.1.7-alpha.2`, ACP Provider `0.1.7`, and Providers UI `0.2.12`.
 - Render native thought and agent history with published Alpha2 primitives instead of missing icon exports; verify retained history and incremental RPC resume in desktop and mobile lab browsers.
+- Require the public SessionQuery service before installing the native first-turn history guard.
 
 ## v0.1.25
 

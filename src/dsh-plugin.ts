@@ -89,7 +89,7 @@ export interface DshPluginContext extends ActivityBindingHostContext {
 }
 
 export const name = 'dsh-acp-cursor'
-export const inject = ['connection', 'webServer']
+export const inject = ['connection', 'webServer', 'sessionQuery']
 
 function defaultStateDirectory(): string {
   return join(dshHome(), 'profiles', 'web', 'cursor-agent')
