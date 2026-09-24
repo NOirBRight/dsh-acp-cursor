@@ -7,6 +7,7 @@ import {
   decodeActivityHistory,
   decodeActivityPage,
 } from '../src/activity-contract.ts'
+import { CURSOR_PLUGIN_RPC_ENDPOINT } from '../src/client-contract.ts'
 import {
   NATIVE_HISTORY_MAX_FOLLOW_UP_PAGES,
   NATIVE_HISTORY_POLL_MS,
@@ -30,12 +31,19 @@ function afterSeqOf(payload: unknown): number {
     : -1
 }
 
-function rpcFace(reply: (endpoint: string, payload: unknown) => Reply): { rpc: ActivityRpc; calls: Array<{ endpoint: string; payload: unknown }> } {
+function rpcFace(
+  reply: (endpoint: string, payload: unknown, signal?: AbortSignal) => Reply | Promise<Reply>,
+): { rpc: ActivityRpc; calls: Array<{ endpoint: string; payload: unknown }> } {
   const calls: Array<{ endpoint: string; payload: unknown }> = []
   const rpc: ActivityRpc = {
-    call: async (_channel, endpoint, payload) => {
+    call: async (channel, method, request, signal) => {
+      if (channel !== '/api' || method !== CURSOR_PLUGIN_RPC_ENDPOINT) throw new Error('unexpected CursorAgent RPC route')
+      if (typeof request !== 'object' || request === null || typeof (request as { endpoint?: unknown }).endpoint !== 'string') {
+        throw new Error('invalid CursorAgent RPC envelope')
+      }
+      const { endpoint, payload } = request as { endpoint: string; payload: unknown }
       calls.push({ endpoint, payload })
-      return reply(endpoint, payload)
+      return reply(endpoint, payload, signal)
     },
   }
   return { rpc, calls }
@@ -300,14 +308,13 @@ describe('native history subscription', () => {
     const held = new Promise<Reply>(resolve => { release = resolve })
     const cursors: number[] = []
     let pendingSignal: AbortSignal | undefined
-    const rpc: ActivityRpc = {
-      call: async (_channel, _endpoint, payload, signal) => {
-        cursors.push(afterSeqOf(payload))
-        if (cursors.length === 1) return page([ready(1), start(2, 't1', owned)], 2, true)
-        if (cursors.length === 2) { pendingSignal = signal; return held }
-        return page([], afterSeqOf(payload), false)
-      },
-    }
+    const { rpc } = rpcFace((endpoint, payload, signal) => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      cursors.push(afterSeqOf(payload))
+      if (cursors.length === 1) return page([ready(1), start(2, 't1', owned)], 2, true)
+      if (cursors.length === 2) { pendingSignal = signal; return held }
+      return page([], afterSeqOf(payload), false)
+    })
     const store = getNativeHistoryStore(rpc, SESSION)
     const stop = store.subscribe(() => undefined)
     await settle()
@@ -343,16 +350,14 @@ describe('native history subscription', () => {
   })
 
   it('never applies an initial page superseded by unsubscribe', async () => {
-    const calls: string[] = []
     let release: (() => void) | undefined
     const held = new Promise<void>(resolve => { release = resolve })
-    const rpc: ActivityRpc = {
-      call: async (_channel, endpoint) => {
-        calls.push(endpoint)
-        if (calls.length === 1) await held
-        return page([ready(1), start(2, 't1', owned)], 2, false)
-      },
-    }
+    let requestCount = 0
+    const { rpc, calls } = rpcFace(async endpoint => {
+      if (endpoint !== ACTIVITY_READ_AFTER_ENDPOINT) return forbiddenFullRead()
+      if (++requestCount === 1) await held
+      return page([ready(1), start(2, 't1', owned)], 2, false)
+    })
     const store = getNativeHistoryStore(rpc, SESSION)
     const unsubscribe = store.subscribe(() => undefined)
     await settle()
@@ -364,7 +369,7 @@ describe('native history subscription', () => {
 
     store.subscribe(() => undefined)
     await settle()
-    expect(calls).toEqual([ACTIVITY_READ_AFTER_ENDPOINT, ACTIVITY_READ_AFTER_ENDPOINT])
+    expect(calls.map(call => call.endpoint)).toEqual([ACTIVITY_READ_AFTER_ENDPOINT, ACTIVITY_READ_AFTER_ENDPOINT])
     expect(store.getSnapshot().rows.map(row => row.key)).toEqual(['2'])
   })
 

@@ -1,4 +1,5 @@
 /** Host RPC for the External Agents settings page. */
+import { clientRequestSchema, type ConnectionRpcAttachment, type HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
@@ -14,7 +15,7 @@ import {
   type CursorAgentActivityPage,
 } from './activity-contract.js'
 import {
-  ACP_SETTINGS_RPC_CHANNEL,
+  CURSOR_PLUGIN_RPC_ENDPOINT,
   PICK_ENDPOINT,
   QUOTA_ENDPOINT,
   RUN_ENDPOINT,
@@ -27,7 +28,31 @@ import {
   type CursorAgentQuotaSnapshot,
 } from './client-contract.js'
 
-type RpcResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: { readonly code: string; readonly message: string; readonly details?: object } }
+type RpcResult = { readonly ok: true; readonly value: unknown; readonly attachments?: readonly ConnectionRpcAttachment[] } | { readonly ok: false; readonly error: { readonly code: string; readonly message: string; readonly details?: object } }
+
+type SettingsRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal, operator: HostConnectionHandle['operator']) => Promise<RpcResult>
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function responseFor(rpcId: string, result: RpcResult): Response {
+  const resultEnvelope = result.ok
+    ? { ok: true as const, value: result.value }
+    : { ok: false as const, error: { ...result.error, details: result.error.details ?? {} } }
+  const envelope = { type: 'server-response' as const, rpcId, result: resultEnvelope }
+  if (!result.ok || result.attachments === undefined || result.attachments.length === 0) return Response.json(envelope)
+
+  const parts = new FormData()
+  const attachments = result.attachments.map((attachment, index) => {
+    const part = `bytes-${index}`
+    parts.set(part, new Blob([new Uint8Array(attachment.bytes)]))
+    return { path: [...attachment.path], codec: 'bytes', part }
+  })
+  parts.set('metadata', JSON.stringify({ ...envelope, attachments }))
+  return new Response(parts)
+}
+
 
 function fail(message: string): RpcResult {
   return { ok: false, error: { code: 'internal', message } }
@@ -54,8 +79,8 @@ export interface AcpSettingsRpcDeps {
 }
 
 /** Handle snapshot, save, provider actions, and executable picking. */
-export function createAcpSettingsRpcHandler(deps: AcpSettingsRpcDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult> {
-  return async (endpoint, payload, signal) => {
+export function createAcpSettingsRpcHandler(deps: AcpSettingsRpcDeps): SettingsRpcHandler {
+  return async (endpoint, payload, signal, _operator) => {
     if (endpoint === SNAPSHOT_ENDPOINT) return { ok: true, value: await deps.snapshot() }
     if (endpoint === CATALOG_ENDPOINT) return { ok: true, value: await deps.catalog() }
     if (endpoint === QUOTA_ENDPOINT) {
@@ -121,10 +146,37 @@ export function createAcpSettingsRpcHandler(deps: AcpSettingsRpcDeps): (endpoint
   }
 }
 
-/** Register the host channel and attach its disposer to this fiber. */
-export function registerAcpSettingsRpc(ctx: { effect(fn: () => unknown, name?: string): void; connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult>): unknown } } }, deps: AcpSettingsRpcDeps): void {
+/** Register the exact authenticated Fetch route and attach its disposer to this fiber. */
+export function registerAcpSettingsRpc(ctx: { effect(fn: () => unknown, name?: string): void; connection: Pick<HostConnectionHandle, 'fetch' | 'operator'> }, deps: AcpSettingsRpcDeps): void {
+  const handler = createAcpSettingsRpcHandler(deps)
   ctx.effect(
-    () => ctx.connection.rpc.handle(ACP_SETTINGS_RPC_CHANNEL, createAcpSettingsRpcHandler(deps)),
+    () => ctx.connection.fetch.register({
+      path: '/api/plugin-rpc/cursor',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async request => {
+        const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+        if (contentType !== 'application/json') return new Response(null, { status: 415 })
+        let body: unknown
+        try {
+          body = await request.json()
+        } catch {
+          return new Response(null, { status: 400 })
+        }
+        const parsed = clientRequestSchema.safeParse(body)
+        const wrapper = parsed.success ? record(parsed.data.payload) : undefined
+        if (!parsed.success || parsed.data.method !== CURSOR_PLUGIN_RPC_ENDPOINT
+          || wrapper === undefined || typeof wrapper.endpoint !== 'string') {
+          return new Response(null, { status: 400 })
+        }
+        try {
+          const result = await handler(wrapper.endpoint, wrapper.payload, request.signal, ctx.connection.operator)
+          return responseFor(parsed.data.rpcId, result)
+        } catch {
+          return new Response(null, { status: 500 })
+        }
+      },
+    }),
     'dsh-acp-cursor: settings RPC',
   )
 }

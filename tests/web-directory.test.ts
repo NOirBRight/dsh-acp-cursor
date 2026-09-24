@@ -39,7 +39,7 @@ describe('Cursor Agent directory account and binding', () => {
       key: 'cursor-agent',
       role: 'agent',
       catalogId: 'cursor-agent',
-      binding: { channel: '/dsh-acp-cursor', endpoint: 'activity/binding' },
+      binding: { channel: 'plugin-rpc/cursor', endpoint: 'activity/binding' },
     }))
   })
 

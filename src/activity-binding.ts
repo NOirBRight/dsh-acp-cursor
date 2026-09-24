@@ -29,21 +29,18 @@ export interface ActivityBindingHostContext {
 /** Read-only access to plugin-owned activity. */
 export type ActivityBindingStore = Pick<CursorAgentActivityStore, 'read'>
 
-/** Exact-session log as `Session.snapshotEvents()` returns it. Structural: no Core import. */
+/** Exact live-preferred log returned by the public SessionQuery service. */
 export interface SessionLogEvent {
   readonly type: string
   readonly data?: unknown
 }
 
-/** Read one live session log; undefined when the session cannot be resolved. */
-export type SessionLogReader = (sessionId: string) => readonly SessionLogEvent[] | undefined
+/** One exact session log read, synchronous for fixtures and asynchronous for public SessionQuery. */
+export type SessionLogRead = readonly SessionLogEvent[] | undefined | Promise<readonly SessionLogEvent[] | undefined>
+/** Read one public session log; undefined when the service or session is unavailable. */
+export type SessionLogReader = (sessionId: string) => SessionLogRead
 
-/** Register the binding guard for the installer's lifetime.
- * @param ctx - Host context whose `llm/stream` waterfall the guard joins.
- * @param store - Sidecar reader answering binding per session id.
- * @param readSessionLog - Exact-session `snapshotEvents` reader; unavailable history blocks unbound native execution.
- * @returns Disposer removing the listener.
- */
+/** Register the binding guard for the installer's lifetime. */
 export function installActivityBindingGuard(
   ctx: ActivityBindingHostContext,
   store: ActivityBindingStore,
@@ -72,8 +69,18 @@ function decideActivityBinding(
     )
   }
   if (!bound) {
-    if (options.provider === ACTIVITY_NATIVE_PROVIDER && dshHistoryLocked(options.messages, readSessionLog, sessionId)) {
-      throw new LlmError(
+    if (options.provider === ACTIVITY_NATIVE_PROVIDER) {
+      const historyLocked = dshHistoryLocked(options.messages, readSessionLog, sessionId)
+      if (typeof historyLocked !== 'boolean') {
+        return (async function* () {
+          if (await historyLocked) throw new LlmError(
+            'This conversation already has DSH history; start a new session to use CursorAgent.',
+            ACTIVITY_HISTORY_LOCKED,
+          )
+          yield* next()
+        })()
+      }
+      if (historyLocked) throw new LlmError(
         'This conversation already has DSH history; start a new session to use CursorAgent.',
         ACTIVITY_HISTORY_LOCKED,
       )
@@ -87,23 +94,33 @@ function decideActivityBinding(
   )
 }
 
+function unavailableHistoryError(): LlmError {
+  return new LlmError(
+    'CursorAgent activity data is unavailable; execution is blocked until it can be read.',
+    ACTIVITY_BINDING_UNAVAILABLE,
+  )
+}
+
 function dshHistoryLocked(
   messages: GenerateOptions['messages'],
   readSessionLog: SessionLogReader,
   sessionId: string,
-): boolean {
+): boolean | Promise<boolean> {
   if (hasPriorModelTurn(messages)) return true
-  let events: readonly SessionLogEvent[] | undefined
+  let events: SessionLogRead
   try {
     events = readSessionLog(sessionId)
-    if (events === undefined) throw new Error('Session history is unavailable')
   } catch {
-    // Canonical session history is required to distinguish first native turns from prior DSH headers.
-    throw new LlmError(
-      'CursorAgent activity data is unavailable; execution is blocked until it can be read.',
-      ACTIVITY_BINDING_UNAVAILABLE,
-    )
+    throw unavailableHistoryError()
   }
+  if (events === undefined) throw unavailableHistoryError()
+  if (events instanceof Promise) return events.then(
+    events => {
+      if (events === undefined) throw unavailableHistoryError()
+      return hasForeignRequestHeader(events)
+    },
+    () => { throw unavailableHistoryError() },
+  )
   return hasForeignRequestHeader(events)
 }
 

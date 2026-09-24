@@ -25,13 +25,23 @@ export interface CursorCatalogModel {
 }
 
 
-export const ACP_SETTINGS_RPC_CHANNEL = '/dsh-acp-cursor'
+export const CURSOR_PLUGIN_RPC_ENDPOINT = 'plugin-rpc/cursor'
 export const SNAPSHOT_ENDPOINT = 'snapshot'
 export const SAVE_ENDPOINT = 'save'
 export const RUN_ENDPOINT = 'run'
 export const PICK_ENDPOINT = 'pick'
 export const CATALOG_ENDPOINT = 'catalog'
 export const QUOTA_ENDPOINT = 'quota'
+
+/** Call the authenticated Cursor settings route without changing RPC result semantics. */
+export function callCursorPluginRpc<T>(
+  rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<T> },
+  endpoint: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  return rpc.call('/api', CURSOR_PLUGIN_RPC_ENDPOINT, { endpoint, payload }, signal)
+}
 
 /** Persisted Settings values for one CursorAgent instance. */
 export interface AcpCursorAgentSettingsConfig {

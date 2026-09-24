@@ -1,9 +1,10 @@
-/** Cordis host plugin: External Agents Settings through settings.section RPC. */
+/** Cordis host plugin: External Agents Settings through an authenticated Fetch route. */
 import { ExternalAgentProviderRegistry, providerInstanceId } from '@deepseek-ai/dsh-acp-provider'
 import { ExternalAgentSettingsEditorRegistry } from '@deepseek-ai/dsh-acp-provider/settings'
 import { join } from 'node:path'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
-import type { ActivityBindingHostContext } from './activity-binding.js'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { ActivityBindingHostContext, SessionLogEvent } from './activity-binding.js'
 import { CURSOR_AGENT_FULL_ACCESS_AUTHORIZED, nativeSessionBinding } from './activity-contract.js'
 import { CursorAgentActivityStore, type CursorAgentActivityEvent } from './activity-store.js'
 import type { AcpCursorAgentSettingsConfig, AcpSettingsRow, AcpSettingsSnapshot } from './client-contract.js'
@@ -84,7 +85,7 @@ export interface DshPluginContext extends ActivityBindingHostContext {
   effect(fn: () => unknown, name?: string): void
   inject?(deps: string[], fn: (scope: { effect: (fn: () => unknown) => unknown; llm: { registerAdapter: (providers: string[], adapter: unknown) => AdapterRegistrationHandle }; connection: DshPluginContext['connection']; modelSwitch?: { adapters: { register: (entry: { provider: string; role: 'agent' }) => () => void } } }) => void): void
   get?(name: string): unknown
-  connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>): unknown } }
+  connection: HostConnectionHandle
 }
 
 export const name = 'dsh-acp-cursor'
@@ -200,8 +201,10 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {})
   const activity = createCursorAgentActivityWriter(join(home, 'plugin-data', 'cursor-agent', 'history'))
   const { installActivityBindingGuard } = await import('./activity-binding.js')
   installActivityBindingGuard(ctx, activity.store, sessionId => {
-    const agent = agentFor(ctx, sessionId) as { session?: { snapshotEvents?: () => readonly { readonly type: string; readonly data?: unknown }[] } } | undefined
-    return agent?.session?.snapshotEvents?.()
+    const sessionQuery = ctx.get?.('sessionQuery') as { readSession?: (id: string) => Promise<{ events: readonly SessionLogEvent[] }> } | undefined
+    return sessionQuery?.readSession === undefined
+      ? undefined
+      : sessionQuery.readSession(sessionId).then(snapshot => snapshot.events)
   })
   const appendActivity = activity.append
   let live = resolvePluginConfig(config, loadPersistedConfig(home))

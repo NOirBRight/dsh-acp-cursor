@@ -14,6 +14,7 @@ import {
   installActivityBindingGuard,
   type ActivityBindingHostContext,
   type ActivityBindingStore,
+  type SessionLogRead,
 } from '../src/activity-binding.js'
 import { CursorAgentActivityStore } from '../src/activity-store.js'
 import { CURSOR_AGENT_SESSION_READY, type CursorAgentSessionReadyEvent } from '../src/tool-events.js'
@@ -66,7 +67,7 @@ function drive(
   store: ActivityBindingStore,
   options: GenerateOptions,
   finalChunks: readonly unknown[] = [],
-  readSessionLog: (sessionId: string) => readonly { readonly type: string; readonly data?: unknown }[] | undefined = () => [],
+  readSessionLog: (sessionId: string) => SessionLogRead = () => [],
 ): { nextCalls: number; run: () => AsyncIterable<StreamChunk> } {
   const ctx: ActivityBindingHostContext = new Context() as unknown as ActivityBindingHostContext
   installActivityBindingGuard(ctx, store, readSessionLog)
@@ -204,6 +205,17 @@ describe('installActivityBindingGuard', () => {
     }
     expect(failure).toBeInstanceOf(LlmError)
     expect((failure as LlmError).code).toBe(ACTIVITY_HISTORY_LOCKED)
+    expect(driver.nextCalls).toBe(0)
+  })
+
+  it('awaits public session-query history before native execution', async () => {
+    const driver = drive(
+      new CursorAgentActivityStore(tempRoot()),
+      loopRequest('old', ACTIVITY_NATIVE_PROVIDER, userOnly()),
+      [],
+      async () => [requestHeader('deepseek')],
+    )
+    await expect(collect(driver.run())).rejects.toMatchObject({ code: ACTIVITY_HISTORY_LOCKED })
     expect(driver.nextCalls).toBe(0)
   })
 
