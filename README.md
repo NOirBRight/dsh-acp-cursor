@@ -6,6 +6,10 @@ DSH is the shell (chat, approvals, filesystem). Cursor owns the turn and tools. 
 
 This is **not** `dsh-llm-cursor` (unofficial chat route, provider `cursor`). This plugin registers provider `cursor-agent`.
 
+## Compatibility
+
+Host `@deepseek-ai/dsh-*` packages are optional peers with a minimum of `0.1.7-alpha.2`; the compile lock targets `0.1.7-rc.1`. Cordis peers support `>=4.0.4 <5.0.0`. DSH `0.1.7-alpha.2` and `0.1.7-rc.1` are verified in `package.json#dsh.compatibility.dshReleases`.
+
 ## Install
 
 Requires `dsh-llm-providers-ui` 0.2.9 on the Host (shared ProviderDetail template). `dsh-acp-provider` is a profile dependency with no bundle of its own.
@@ -15,8 +19,8 @@ Requires `dsh-llm-providers-ui` 0.2.9 on the Host (shared ProviderDetail templat
 ```sh
 dsh plugin --profile web add --force \
   https://github.com/NOirBRight/dsh-llm-providers-ui/releases/download/v0.2.9/dsh-llm-providers-ui-0.2.9.tgz \
-  https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.6/deepseek-ai-dsh-acp-provider-0.1.6.tgz \
-  https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.25/deepseek-ai-dsh-acp-cursor-0.1.25.tgz
+  https://github.com/NOirBRight/dsh-acp-provider/releases/download/v0.1.8/deepseek-ai-dsh-acp-provider-0.1.8.tgz \
+  https://github.com/NOirBRight/dsh-acp-cursor/releases/download/v0.1.28/deepseek-ai-dsh-acp-cursor-0.1.28.tgz
 ```
 
 Missing CLI: Settings → Cursor → Install (official `curl https://cursor.com/install`). Sign-in is `cursor-agent login` (DeepControl link; host does not open a browser). Quota uses the same CLI token. Sign-out runs `cursor-agent logout` on this machine.

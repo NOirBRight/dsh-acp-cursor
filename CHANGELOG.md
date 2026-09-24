@@ -1,3 +1,7 @@
+## 0.1.28
+
+- Verify DSH 0.1.7-rc.1, accept Host package versions from 0.1.7-alpha.2 onward, and use ACP Provider 0.1.8 with Providers UI 0.2.13.
+
 ## 0.1.27
 
 - Target official DSH `0.1.7-alpha.2`, ACP Provider `0.1.7`, and Providers UI `0.2.12`.
