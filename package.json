@@ -40,6 +40,7 @@
     "README.md",
     "CHANGELOG.md",
     "docs/notes",
+    "scripts/check-dsh-host-ranges.mjs",
     "LICENSE"
   ],
   "engines": {
@@ -48,8 +49,10 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json",
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsdown && node scripts/check-client-bundle.mjs",
-    "test": "vitest run",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "test": "pnpm run check:dsh-host-ranges && vitest run",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "check:dsh-host-ranges": "node scripts/check-dsh-host-ranges.mjs",
+    "prepack": "pnpm run check:dsh-host-ranges"
   },
   "dsh": {
     "bundle": {
